@@ -1,0 +1,5 @@
+streamlit
+pandas
+rapidfuzz
+openpyxl  # For Excel support
+python-dateutil
