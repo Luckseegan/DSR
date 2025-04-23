@@ -1,5 +1,5 @@
 streamlit
 pandas
-RapidFuzz==3.12.2
+rapidFuzz==3.12.2
 openpyxl==3.1.5
 python-dateutil==2.9.0.post0
