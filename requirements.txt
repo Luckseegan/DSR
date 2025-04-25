@@ -4,3 +4,4 @@ rapidFuzz==3.12.2
 openpyxl==3.1.5
 python-dateutil==2.9.0.post0
 xlrd>=2.0.1
+plotly==6.0.0
