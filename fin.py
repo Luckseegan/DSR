@@ -1533,7 +1533,7 @@ def show_sidebar():
                 st.rerun()
 
 def show_current_step():
-    st.title("📊 DSR Data Processing Pipeline")
+    st.title("📊 Tharaka-DSR Data Processor")
     st.caption("Process and combine shipment data from multiple sources")
     
     # Add a button to jump directly to visualization step
