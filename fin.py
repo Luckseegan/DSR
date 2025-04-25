@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import timedelta
 from rapidfuzz import process, fuzz
 import time
+import plotly.express as px
+
 
 
 # ========================
@@ -37,7 +39,7 @@ class ConfigurationManager:
                 "Origin Vessel", "Connecting vessel", "Voyage No", "ATD",
                 "ATA", "ETB", "Estimated Clearance", "Status", "HB/L NO",
                 "Container No.", "Bond or Non Bond", "Cleared By", "REMARK",
-                "Delivery date", "Delivery location", "sheet"
+                "Delivery date", "Delivery location","CUSDEC No","CUSDEC Date", "sheet"
             ],
             "mappings":{
                     "expo": {
@@ -54,7 +56,7 @@ class ConfigurationManager:
                                 "Bond or Non Bond": "BOND/Non BOND", "REMARK": "Comments",
                                 "Delivery date": "Delivery Date", "Delivery location": "Location",
                                 "Container No.": "Container No", "Shipper": "Supplier( Name as for the Invoice)",
-                                "Type": " Type (In two letters)", "SBU": "Consignee"
+                                "Type": " Type (In two letters)", "SBU": "Consignee","CUSDEC No":48,"CUSDEC Date":"Cusdec Date"
                             },
                         "non_bond": {
                             "HBL": "HBL",
@@ -82,7 +84,9 @@ class ConfigurationManager:
                             "Container No.": "Container No",
                             "Shipper": "Supplier( Name as for the Invoice)",
                             "Type": "TYPE (IN TWO LETTERS)",
-                            "SBU": "Consignee"
+                            "SBU": "Consignee",
+                            "CUSDEC No":50,
+                            "CUSDEC Date":"CUSDEC SUBMITTED DATE"
                         },
                         "fcl": {
                                 "HBL": "HBL", "PO #": 3, "Gross Weight": "Gross Weight",
@@ -97,7 +101,9 @@ class ConfigurationManager:
                                 "Bond or Non Bond": "BOND/Non BOND", "REMARK": "Comments",
                                 "Delivery date": 52, "Delivery location": 54,
                                 "Container No.": "Container No", "Shipper": "Supplier( Name as for the Invoice)",
-                                "Type": 14, "SBU": "Consignee"
+                                "Type": 14, "SBU": "Consignee",
+                            "CUSDEC No":"Cusdec No.",
+                            "CUSDEC Date":"CUSDEC SUBMITTED DATE"
                             }
                     },
                     "maersk": {
@@ -127,7 +133,9 @@ class ConfigurationManager:
         "Origin Vessel": 24,
         "Connecting vessel": 25,
         "Type": 15,
-        "SBU": "Consignee"
+        "SBU": "Consignee",
+                            "CUSDEC No":"Cusdec No.",
+                            "CUSDEC Date":"CUSDEC SUBMITTED DATE"
     },
                         "archived": {
         # Direct column name mappings
@@ -155,13 +163,15 @@ class ConfigurationManager:
         "Origin Vessel": 24,
         "Connecting vessel": 25,
         "Type": 15,
-        "SBU": "Consignee"
+        "SBU": "Consignee",
+                            "CUSDEC No":"Cusdec No.",
+                            "CUSDEC Date":"CUSDEC SUBMITTED DATE"
     }
                     },
                     "globe": {
                         "ongoing": {
                                     # Exact matches (auto-aligned columns)
-                                    "ETA": "ETA",
+                                    "ETA": "ETA DATE",
                                     "PO #": "PO #",
                                     # Manual mappings for missing columns
                                     "ATA":  None,  # Assuming MAS REF # represents ATA (adjust if needed)
@@ -191,11 +201,12 @@ class ConfigurationManager:
                                     "Shipper": "SHIPPER",
                                     "Status": "STATUS",
                                     "Type": None,  # Assuming Type is missing
-                                    "Voyage No": None,  # Assuming Voyage No is missing
+                                    "Voyage No": None,
+                            "CUSDEC No":"ENTRY # / DATE",
                                 },
                         "cleared":  {
                                         # Exact matches (auto-aligned columns)
-                                        "ETA": "ETA",
+                                        "ETA": "ETA DATE",
                                         "PO #": "PO #",
                                         
                                         # Manual mappings for missing columns
@@ -226,7 +237,9 @@ class ConfigurationManager:
                                         "Shipper": "SHIPPER",
                                         "Status": "STATUS",
                                         "Type": None,  # Assuming Type is missing
-                                        "Voyage No": None,  # Assuming Voyage No is missing
+                                        "Voyage No": None,
+                                        "CUSDEC No":"ENTRY #",
+  # Assuming Voyage No is missing
                                     }
 
                     },
@@ -243,7 +256,8 @@ class ConfigurationManager:
                                 "HBL": "HBL NO", "Inv #": "IA1:AC1NVOICE", "LCL,FCL Status": "LCL/FCL",
                                 "Origin": "Port of Origin", "Origin Vessel": "First Vessel", "PO #": 1,
                                 "Port": "Port of Origin", "REMARK": "Comments", "SBU": 3,
-                                "Shipper": "Supplier", "Status": "Pre Alert Status", "Type": "CTN Type"
+                                "Shipper": "Supplier", "Status": "Pre Alert Status", "Type": "CTN Type",
+                                "CUSDEC No":"Cusdec No",
                             },
                         "bodyline": {
                             "ETA": "ETA", "ATD": "ATD", "Bond or Non Bond": "Bond or Non Bond",
@@ -257,7 +271,9 @@ class ConfigurationManager:
                             "HBL": "HBL NO", "Inv #": "INVOICE", "LCL,FCL Status": "LCL/FCL",
                             "Origin": "Port of Origin", "Origin Vessel": "First Vessel", "PO #": 1,
                             "Port": "Port of Origin", "REMARK": "Remarks", "SBU": 3,
-                            "Shipper": "Supplier", "Status": "Pre Alert Status", "Type": "CTN Type"
+                            "Shipper": "Supplier", "Status": "Pre Alert Status", "Type": "CTN Type",
+                            "CUSDEC No":"Cusdec No",
+
                         }
                     }
                 }
@@ -357,19 +373,7 @@ class ConfigurationManager:
                         errors.append(f"Mapping references non-existent column: {target_col} in {file_type}/{sheet_type}")
         return errors
 
-    # def validate_config(self):
-    #     """Validate the current configuration"""
-    #     errors = []
-        
-        
-    #     # Check mappings reference valid columns
-    #     for file_type, sheets in self.config["mappings"].items():
-    #         for sheet_type, mappings in sheets.items():
-    #             for target_col in mappings.keys():
-    #                 if target_col not in self.get_all_columns():
-    #                     errors.append(f"Mapping references non-existent column: {target_col} in {file_type}/{sheet_type}")
-        
-    #     return errors
+
 
 # Initialize configuration manager
 config_manager = ConfigurationManager()
@@ -439,108 +443,6 @@ def show_column_management():
                 st.success(f"Removed column: {col_to_remove}")
                 st.rerun()
 
-
-# def show_column_management():
-#     st.subheader("Column Management")
-    
-#     # Current columns display
-#     col1, col2 = st.columns(2)
-#     with col1:
-#         st.write("**Required Columns**")
-#         required_cols = st.data_editor(
-#             pd.DataFrame(config_manager.config["columns"]["required"], columns=["Column"]),
-#             num_rows="dynamic",
-#             key="required_cols_editor",
-#             hide_index=True
-#         )
-        
-#     with col2:
-#         st.write("**Optional Columns**")
-#         optional_cols = st.data_editor(
-#             pd.DataFrame(config_manager.config["columns"]["optional"], columns=["Column"]),
-#             num_rows="dynamic",
-#             key="optional_cols_editor",
-#             hide_index=True
-#         )
-    
-#     # Add new column
-#     st.subheader("Add New Column")
-#     new_col = st.text_input("Column Name", key="new_column_name")
-#     col_type = st.radio("Column Type", ["Optional", "Required"], key="new_column_type")
-    
-#     if st.button("Add Column", key="add_column_btn"):
-#         if not new_col.strip():
-#             st.error("Column name cannot be empty")
-#         elif config_manager.add_column(new_col.strip(), col_type == "Required"):
-#             st.success(f"Added {col_type.lower()} column: {new_col}")
-#             config_manager.save_config()
-#             st.rerun()
-#         else:
-#             st.error(f"Column '{new_col}' already exists")
-    
-#     # Remove column
-#     st.subheader("Remove Column")
-#     all_optional_cols = config_manager.config["columns"]["optional"]
-#     col_to_remove = st.selectbox(
-#         "Select column to remove",
-#         [""] + all_optional_cols,
-#         key="col_to_remove"
-#     )
-    
-#     if col_to_remove and st.button("Remove Column", key="remove_column_btn"):
-#         if config_manager.remove_column(col_to_remove):
-#             st.success(f"Removed column: {col_to_remove}")
-#             config_manager.save_config()
-#             st.rerun()
-#         else:
-#             st.error(f"Cannot remove required column: {col_to_remove}")
-
-# def show_mapping_management():
-#     st.subheader("Mapping Management")
-    
-#     file_type = st.selectbox(
-#         "Select File Type",
-#         ["expo", "maersk", "globe", "scanwell"],
-#         key="mapping_file_type"
-#     )
-    
-#     sheet_type = st.selectbox(
-#         "Select Sheet Type",
-#         list(config_manager.config["mappings"].get(file_type, {}).keys()),
-#         key="mapping_sheet_type"
-#     )
-    
-#     if not sheet_type:
-#         st.warning(f"No sheets defined for {file_type}")
-#         return
-    
-#     current_mappings = config_manager.get_mappings(file_type, sheet_type)
-#     updated_mappings = {}
-    
-#     for i, target_col in enumerate(config_manager.get_all_columns()):
-#         current_val = current_mappings.get(target_col, "")
-        
-#         col1, col2 = st.columns([1, 3])
-#         with col1:
-#             st.markdown(f"**{target_col}**")
-        
-#         with col2:
-#             # Use index in key to guarantee uniqueness
-#             updated_mappings[target_col] = st.text_input(
-#                 "Source column or index",
-#                 value=current_val,
-#                 key=f"mapping_{file_type}_{sheet_type}_{i}",  # Unique index-based key
-#                 label_visibility="collapsed"
-#             )
-    
-#     if st.button("Save Mappings", key=f"save_{file_type}_{sheet_type}"):
-#         config_manager.update_mappings(
-#             file_type,
-#             sheet_type,
-#             {k: v for k, v in updated_mappings.items() if v}
-#         )
-#         if config_manager.save_config():
-#             st.success("Mappings saved!")
 
 def show_mapping_management():
     st.subheader("Mapping Management")
@@ -707,7 +609,7 @@ def get_date_range_weeks():
     """Get current date range setting"""
     return config_manager.config["global"]["date_range_weeks"]
 
-def filter_and_match_consignee(df, target_consignees=None, date_column="ETA", threshold=None):
+# def filter_and_match_consignee(df, target_consignees=None, date_column="ETA", threshold=None):
     try:
         # Use configured values if not provided
         if target_consignees is None:
@@ -759,6 +661,60 @@ def filter_and_match_consignee(df, target_consignees=None, date_column="ETA", th
         # Check if matched_df is empty and handle accordingly
         if matched_df.empty:
             return pd.DataFrame(), removed_df  # Return empty matched_df and removed_df with the non-matching rows
+
+        return matched_df, removed_df
+
+    except Exception as e:
+        print(f"❌ Error in filter_and_match_consignee: {str(e)}")
+        return pd.DataFrame(), pd.DataFrame()
+
+def filter_and_match_consignee(df, target_consignees=None, date_column="ETA", threshold=None):
+    try:
+        # Use configured values if not provided
+        if target_consignees is None:
+            target_consignees = get_target_consignees()
+        if threshold is None:
+            threshold = get_fuzzy_threshold()
+            
+        # Only process date if filtering is enabled and column exists
+        if st.session_state.get('use_date_filter', True) and date_column in df.columns:
+            df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
+            
+            # Use configured date range
+            ref_date = st.session_state.selected_reference_date
+            weeks = get_date_range_weeks()
+            start_date = ref_date - timedelta(weeks=weeks)
+            end_date = ref_date + timedelta(weeks=weeks)
+
+            # Filter rows based on ETA date range
+            filtered_df = df[
+                (df[date_column] >= start_date) & (df[date_column] <= end_date)
+            ].copy()
+        else:
+            filtered_df = df.copy()
+
+        # Rest of the function remains the same...
+        # Normalize the consignee names for matching
+        def normalize_text(text):
+            return ''.join(e for e in str(text).lower() if e.isalnum()) if pd.notna(text) else ""
+
+        filtered_df["Consignee_clean"] = filtered_df["Consignee"].apply(normalize_text)
+        normalized_targets = [normalize_text(name) for name in target_consignees]
+
+        # Function to get the best match using fuzzy matching
+        def get_best_match_score(text):
+            if not text:
+                return pd.Series([pd.NA, 0])
+            match_data = process.extractOne(text, normalized_targets, scorer=fuzz.token_set_ratio)
+            if not match_data:
+                return pd.Series([pd.NA, 0])
+            return pd.Series([match_data[0], match_data[1]])
+
+        filtered_df[["BestMatch", "Score"]] = filtered_df["Consignee_clean"].apply(get_best_match_score)
+
+        # Filter rows based on matching score
+        matched_df = filtered_df[filtered_df["Score"] >= threshold].copy()
+        removed_df = filtered_df[filtered_df["Score"] < threshold].copy()
 
         return matched_df, removed_df
 
@@ -841,6 +797,7 @@ def map_and_append_maersk_data(source_df, final_df, column_mapping, sheet_name="
 # ========================
 # EXPO PROCESSING (YOUR EXISTING CODE)
 # ========================
+
 def process_expo_file(uploaded_file):
     try:
         # Process Bond Sheet - use get_target_consignees()
@@ -861,8 +818,6 @@ def process_expo_file(uploaded_file):
         print(f"🔍 Matched FCL Rows: {len(matched_fcl)}")
         processed_fcl = process_fcl_sheet(matched_fcl) if not matched_fcl.empty else pd.DataFrame()
 
-        # Rest of the function remains exactly the same...
-        # ... [keep all existing code]
         # Combine all non-empty sheets
         combined_sheets = [df for df in [processed_bond, processed_non_bond, processed_fcl] if not df.empty]
 
@@ -872,10 +827,14 @@ def process_expo_file(uploaded_file):
 
         final_df = pd.concat(combined_sheets, ignore_index=True)
 
-        # Convert all datetime columns to date only (no time)
-        for col in final_df.columns:
-            if pd.api.types.is_datetime64_any_dtype(final_df[col]):
-                final_df[col] = final_df[col].dt.date
+        # Clean up data types - convert potential date columns
+        date_cols = ['ETA', 'ATD', 'ATA', 'ETB', 'Estimated Clearance', 'Delivery date']
+        for col in date_cols:
+            if col in final_df.columns:
+                # First try to convert to datetime
+                final_df[col] = pd.to_datetime(final_df[col], errors='coerce')
+                # Then convert valid dates to date-only format
+                final_df[col] = final_df[col].apply(lambda x: x.date() if pd.notna(x) else pd.NA)
 
         st.session_state.expo_data = final_df
         st.session_state.expo_processed = True
@@ -885,19 +844,22 @@ def process_expo_file(uploaded_file):
 
         total_rows = len(final_df)
         sheet_counts = final_df['sheet'].value_counts()
-        eta_stats = final_df.groupby('sheet')['ETA'].agg(['min', 'max'])
 
         st.markdown(f"**✅ Total Rows Processed:** `{total_rows}`")
 
         cols = st.columns(2)
         with cols[0]:
             st.markdown("**📁 Record Counts by Sheet**")
-            st.dataframe(sheet_counts.rename_axis("Sheet").reset_index(name="Records"), use_container_width=True)
+            st.dataframe(sheet_counts.rename_axis("Sheet").reset_index(name="Records"), 
+                         use_container_width=True)
 
         with cols[1]:
             st.markdown("**📅 ETA Date Ranges**")
-            eta_stats_display = eta_stats.reset_index()
-            st.dataframe(eta_stats_display, use_container_width=True)
+            if 'ETA' in final_df.columns:
+                eta_stats = final_df[['sheet', 'ETA']].dropna().groupby('sheet')['ETA'].agg(['min', 'max']).reset_index()
+                st.dataframe(eta_stats, use_container_width=True)
+            else:
+                st.warning("ETA column not found.")
 
         # --- 💾 Download Button ---
         csv = final_df.to_csv(index=False).encode('utf-8')
@@ -941,8 +903,8 @@ def process_bond_sheet(df):
                 processed_df[target_col] = "expo_bond"
             elif target_col == "HB/L NO" and "HBL" in df.columns:
                 processed_df[target_col] = df["HBL"]
-            elif target_col == "Bond or Non Bond":
-                processed_df[target_col] = "Bond"
+            # elif target_col == "Bond or Non Bond":
+            #     processed_df[target_col] = "Bond"
             else:
                 processed_df[target_col] = pd.NA
 
@@ -977,8 +939,8 @@ def process_non_bond_sheet(df):
                 processed_df[target_col] = "expo_nonbond"
             elif target_col == "HB/L NO" and "HBL" in df.columns:
                 processed_df[target_col] = df["HBL"]
-            elif target_col == "Bond or Non Bond":
-                processed_df[target_col] = "Non Bond"
+            # elif target_col == "Bond or Non Bond":
+            #     processed_df[target_col] = "Non Bond"
             else:
                 processed_df[target_col] = pd.NA
 
@@ -1100,6 +1062,7 @@ def process_maersk_file(uploaded_file):
         print("❌ ERROR TRACE:", e)
         return pd.DataFrame()
 
+
 def process_maersk_dsr(df):
     # Get mappings from config instead of hardcoded
     column_mappings = config_manager.get_mappings("maersk", "dsr")
@@ -1125,8 +1088,8 @@ def process_maersk_dsr(df):
                 processed_df[target_col] = "maersk_dsr"
             elif target_col == "HB/L NO":
                 processed_df[target_col] = df.get("HBL", pd.NA)
-            elif target_col == "Bond or Non Bond":
-                processed_df[target_col] = default_bond_type  # From config
+            # elif target_col == "Bond or Non Bond":
+            #     processed_df[target_col] = default_bond_type  # From config
             else:
                 processed_df[target_col] = pd.NA
 
@@ -1158,27 +1121,41 @@ def process_maersk_archived(df):
                 processed_df[target_col] = "maersk_archived"
             elif target_col == "HB/L NO":
                 processed_df[target_col] = df.get("HBL", pd.NA)
-            elif target_col == "Bond or Non Bond":
-                processed_df[target_col] = pd.NA  # From config
+            # elif target_col == "Bond or Non Bond":
+            #     processed_df[target_col] = pd.NA  # From config
             else:
                 processed_df[target_col] = pd.NA
 
     return processed_df
+
+
 
 def show_maersk_summary(final_df):
     st.subheader("📊 Maersk Processing Summary")
     
     total_rows = len(final_df)
     sheet_counts = final_df['sheet'].value_counts()
-    eta_stats = final_df.groupby('sheet')['ETA'].agg(['min', 'max']).reset_index()
-    
+
+    # 👉 Ensure 'ETA' is in datetime format before grouping
+    if 'ETA' in final_df.columns:
+        try:
+            final_df['ETA'] = pd.to_datetime(final_df['ETA'], errors='coerce')
+        except Exception as e:
+            st.warning(f"⚠️ Failed to convert ETA to datetime: {str(e)}")
+
+    # Now safely aggregate
+    if 'ETA' in final_df.columns and pd.api.types.is_datetime64_any_dtype(final_df['ETA']):
+        eta_stats = final_df.groupby('sheet')['ETA'].agg(['min', 'max']).reset_index()
+        
+        st.markdown("**📅 Date Ranges**")
+        st.dataframe(eta_stats, hide_index=True, use_container_width=True)
+    else:
+        st.warning("⚠️ ETA column missing or not in datetime format. Skipping date ranges.")
+
     cols = st.columns(3)
     cols[0].metric("Total Rows", total_rows)
     cols[1].metric("DSR Records", sheet_counts.get('maersk_dsr', 0))
     cols[2].metric("Archived Records", sheet_counts.get('maersk_archived', 0))
-    
-    st.markdown("**📅 Date Ranges**")
-    st.dataframe(eta_stats, hide_index=True, use_container_width=True)
 
 
 # ========================
@@ -1224,7 +1201,7 @@ def process_globe_file(uploaded_file):
                 final_df=final_df,
                 column_mapping=ongoing_mappings,
                 sheet_name="globe_ongoing",
-                default_bond_type="FCL"
+                # default_bond_type="FCL"
             )
             st.write(f"✅ Added {len(mapped_ongoing)} ONGOING records")
         else:
@@ -1479,14 +1456,22 @@ def show_sidebar():
         st.markdown("---")
         st.subheader("🛠️ Processing Parameters")
         
-        # Date Selection with better labels
-        weeks = config_manager.config["global"]["date_range_weeks"]
-        selected_date = st.date_input(
-            "📅 Reference Date for Shipments",
-            value=st.session_state.selected_reference_date,
-            help=f"Will show shipments within ±{weeks} weeks of this date"
+        # Add date filtering toggle
+        st.session_state.use_date_filter = st.checkbox(
+            "Enable Date Filtering",
+            value=False,
+            help="Filter records by date range when enabled"
         )
-        st.session_state.selected_reference_date = pd.Timestamp(selected_date)
+        
+        # Only show date selection if filtering is enabled
+        if st.session_state.use_date_filter:
+            weeks = config_manager.config["global"]["date_range_weeks"]
+            selected_date = st.date_input(
+                "📅 Reference Date for Shipments",
+                value=st.session_state.selected_reference_date,
+                help=f"Will show shipments within ±{weeks} weeks of this date"
+            )
+            st.session_state.selected_reference_date = pd.Timestamp(selected_date)
         
         # Fuzzy Threshold with visual indicator
         threshold = config_manager.config["global"]["fuzzy_threshold"]
@@ -1551,8 +1536,14 @@ def show_current_step():
     st.title("📊 DSR Data Processing Pipeline")
     st.caption("Process and combine shipment data from multiple sources")
     
-    current_step = st.session_state.current_step
+    # Add a button to jump directly to visualization step
+    if st.session_state.current_step != 5:
+        if st.button("🚀 Jump to Visualization Step", type="secondary"):
+            st.session_state.current_step = 5
+            st.rerun()
     
+    current_step = st.session_state.current_step
+
     # Step 1: Expo Data
     if current_step == 1:
         with st.container(border=True):
@@ -1647,98 +1638,470 @@ def show_current_step():
     # Final Step: Results
     elif current_step == 5:
         with st.container(border=True):
-            st.subheader("5. Combined Results Overview")
-            combined = pd.concat([
-                st.session_state.expo_data,
-                st.session_state.maersk_data,
-                st.session_state.globe_data,
-                st.session_state.scanwell_data
-            ], ignore_index=True)
+            st.subheader("📊 Data Visualization & Analysis")
             
-            st.success(f"✨ Processing complete! Total records: {len(combined):,}")
+            # Initialize combined as empty DataFrame
+            combined = pd.DataFrame()
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Unique HBLs", combined['HBL'].nunique())
-            with col2:
-                # Convert ETA to datetime if it's not already
-                if 'ETA' in combined.columns:
-                    try:
-                        combined['ETA'] = pd.to_datetime(combined['ETA'], errors='coerce')
-                        valid_dates = combined['ETA'].dropna()
-                        if not valid_dates.empty:
-                            st.metric("Earliest ETA", valid_dates.min().date())
-                        else:
-                            st.metric("Earliest ETA", "No valid dates")
-                    except Exception as e:
-                        st.metric("Earliest ETA", "Date conversion failed")
-                else:
-                    st.metric("Earliest ETA", "Column not found")
-
-            tab1, tab2 = st.tabs(["📊 Data Preview", "📈 Summary Statistics"])
+            # Add option to use existing merged data or upload new
+            analysis_option = st.radio(
+                "Choose data source:",
+                options=["Use previously processed data", "Upload new file for analysis"],
+                index=0,
+                horizontal=True
+            )
             
-            with tab1:
-                st.dataframe(combined.head(), use_container_width=True)
-            
-            with tab2:
-                st.write("**Records by Source:**")
-                st.bar_chart(combined['sheet'].value_counts())
+            if analysis_option == "Upload new file for analysis":
+                quick_file = st.file_uploader(
+                    "Upload any Excel/CSV for analysis",
+                    type=['xlsx', 'xls', 'csv'],
+                    key='quick_analysis'
+                )
                 
-                # Monthly Shipments chart with proper error handling
-                if 'ETA' in combined.columns:
+                if quick_file:
                     try:
-                        # Ensure ETA is datetime and drop NaNs
-                        combined['ETA'] = pd.to_datetime(combined['ETA'], errors='coerce')
-                        monthly_data = combined.dropna(subset=['ETA']).copy()
-                        
-                        if not monthly_data.empty:
-                            monthly_data['Month'] = monthly_data['ETA'].dt.to_period('M')
-                            monthly_counts = monthly_data.groupby('Month').size()
-                            st.write("**Monthly Shipments:**")
-                            st.line_chart(monthly_counts)
+                        if quick_file.name.endswith('.csv'):
+                            combined = pd.read_csv(quick_file)
                         else:
-                            st.warning("No valid dates available for monthly chart")
+                            combined = pd.read_excel(quick_file)
+                        st.success("File uploaded successfully!")
                     except Exception as e:
-                        st.error(f"Could not generate monthly chart: {str(e)}")
+                        st.error(f"Error reading file: {str(e)}")
+            else:
+                # Use existing processed data
+                if (st.session_state.expo_processed or st.session_state.maersk_processed or 
+                    st.session_state.globe_processed or st.session_state.scanwell_processed):
+                    combined = pd.concat([
+                        st.session_state.expo_data,
+                        st.session_state.maersk_data,
+                        st.session_state.globe_data,
+                        st.session_state.scanwell_data
+                    ], ignore_index=True)
                 else:
-                    st.warning("ETA column not available for monthly chart")  
-    # # Final Step: Results
-    # elif current_step == 5:
-    #     with st.container(border=True):
-    #         st.subheader("5. Combined Results Overview")
-    #         combined = pd.concat([
-    #             st.session_state.expo_data,
-    #             st.session_state.maersk_data,
-    #             st.session_state.globe_data,
-    #             st.session_state.scanwell_data
-    #         ], ignore_index=True)
+                    st.warning("No processed data available - please upload files in previous steps")
             
-    #         st.success(f"✨ Processing complete! Total records: {len(combined):,}")
-            
-    #         col1, col2 = st.columns(2)
-    #         with col1:
-    #             st.metric("Unique HBLs", combined['HBL'].nunique())
-    #         with col2:
-    #                 # With this robust version:
-    #                 if not combined.empty and pd.api.types.is_datetime64_any_dtype(combined['ETA']):
-    #                     min_date = combined['ETA'].min()
-    #                     if pd.notna(min_date):
-    #                         st.metric("Earliest ETA", min_date.date())
-    #                     else:
-    #                         st.metric("Earliest ETA", "No valid dates")
-    #                 else:
-    #                     st.metric("Earliest ETA", "N/A")            
+            # Only proceed if we have data
+            if not combined.empty:
+                st.success(f"✨ Data loaded! Total records: {len(combined):,}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Unique HBLs", combined['HBL'].nunique())
+                with col2:
+                    # Normalize column names
+                    combined.columns = [col.strip() for col in combined.columns]
+                    gross_weight_col = next(
+                        (col for col in combined.columns if col.lower().replace(" ", "") == "grossweight"), 
+                        None
+                    )
+                    if gross_weight_col:
+                        try:
+                            combined[gross_weight_col] = (
+                                pd.to_numeric(
+                                    combined[gross_weight_col]
+                                    .astype(str)
+                                    .str.replace(",", "")
+                                    .str.extract(r"(\d+\.?\d*)")[0],
+                                    errors='coerce'
+                                )
+                            )
+                            total_weight = combined[gross_weight_col].sum()
+                            st.metric("Total Gross Weight", f"{total_weight:,.2f} kg")
+                        except Exception as e:
+                            st.metric("Total Gross Weight", f"Error: {str(e)}")
+                    else:
+                        st.metric("Total Gross Weight", "Column not found")
 
-    #         tab1, tab2 = st.tabs(["📊 Data Preview", "📈 Summary Statistics"])
-            
-    #         with tab1:
-    #             st.dataframe(combined.head(), use_container_width=True)
-            
-    #         with tab2:
-    #             st.write("**Records by Source:**")
-    #             st.bar_chart(combined['sheet'].value_counts())
-    #             st.write("**Monthly Shipments:**")
-    #             st.line_chart(combined.groupby(combined['ETA'].dt.to_period('M')).size())
+                # Filter block
+                st.markdown("### 🔎 Filter Records")
+                filter_col1, filter_col2 = st.columns(2)
+
+                with filter_col1:
+                    selected_hbls = st.multiselect(
+                        "Filter by HBL",
+                        options=combined['HBL'].dropna().unique(),
+                        default=None
+                    )
+
+                with filter_col2:
+                    selected_invs = st.multiselect(
+                        "Filter by Inv #",
+                        options=combined['Inv #'].dropna().unique(),
+                        default=None
+                    )
+
+                filtered_combined = combined.copy()
+                if selected_hbls:
+                    filtered_combined = filtered_combined[filtered_combined['HBL'].isin(selected_hbls)]
+                if selected_invs:
+                    filtered_combined = filtered_combined[filtered_combined['Inv #'].isin(selected_invs)]
+
+                st.info(f"🔍 Showing {len(filtered_combined):,} filtered records")
+
+                # Show filtered data
+                if not filtered_combined.empty:
+                    with st.expander("🔍 View Filtered Data", expanded=False):
+                        st.dataframe(
+                            filtered_combined,
+                            use_container_width=True,
+                            height=400
+                        )
+
+                # Visualizations organized in tabs
+                st.markdown("---")
+                st.subheader("📊 Additional Visual Insights")
+                
+                # Initialize date filter variables
+                viz_filtered = filtered_combined.copy()
+                
+                if 'ETA' in filtered_combined.columns:
+                    try:
+                        # Ensure ETA is datetime and drop NA values
+                        filtered_combined['ETA'] = pd.to_datetime(filtered_combined['ETA'], errors='coerce')
+                        valid_dates = filtered_combined.dropna(subset=['ETA'])
+                        
+                        if not valid_dates.empty:
+                            min_date = valid_dates['ETA'].min().date()
+                            max_date = valid_dates['ETA'].max().date()
+                            
+                            # Initialize session state for dates
+                            if 'date_filter' not in st.session_state:
+                                st.session_state.date_filter = {
+                                    'start_date': min_date,
+                                    'end_date': max_date
+                                }
+                            
+                            # Date filter section for visualizations
+                            st.markdown("### ⏳ Filter Visualizations by Date Range")
+                            date_col1, date_col2, date_col3 = st.columns([2, 2, 1])
+                            
+                            with date_col1:
+                                start_date = st.date_input(
+                                    "Start Date",
+                                    value=st.session_state.date_filter['start_date'],
+                                    min_value=min_date,
+                                    max_value=max_date,
+                                    key='viz_start_date'
+                                )
+                            
+                            with date_col2:
+                                end_date = st.date_input(
+                                    "End Date",
+                                    value=st.session_state.date_filter['end_date'],
+                                    min_value=min_date,
+                                    max_value=max_date,
+                                    key='viz_end_date'
+                                )
+                            
+                            with date_col3:
+                                st.write("")  # Spacer for alignment
+                                if st.button("🔄 Reset Dates", key="reset_viz_dates"):
+                                    st.session_state.date_filter = {
+                                        'start_date': min_date,
+                                        'end_date': max_date
+                                    }
+                                    st.rerun()
+                            
+                            # Update session state if dates changed
+                            if (start_date != st.session_state.date_filter['start_date'] or 
+                                end_date != st.session_state.date_filter['end_date']):
+                                st.session_state.date_filter = {
+                                    'start_date': start_date,
+                                    'end_date': end_date
+                                }
+                                st.rerun()
+                            
+                            # Apply date filter to all visualizations
+                            viz_filtered = filtered_combined[
+                                (filtered_combined['ETA'].dt.date >= st.session_state.date_filter['start_date']) & 
+                                (filtered_combined['ETA'].dt.date <= st.session_state.date_filter['end_date'])
+                            ]
+                            
+                            # Show record count instead of date range
+                            st.info(f"📊 Showing {len(viz_filtered):,} records")
+                        else:
+                            st.warning("No valid dates available in ETA column")
+                            viz_filtered = filtered_combined
+                            
+                    except Exception as e:
+                        st.warning(f"Couldn't process dates: {e}")
+                        viz_filtered = filtered_combined
+                else:
+                    viz_filtered = filtered_combined
+                
+                # Visualization tabs - ALL using viz_filtered with proper formatting
+                tab1, tab2, tab3, tab4 = st.tabs([
+                    "📅 Time Trends", 
+                    "🚢 Vessel Insights", 
+                    "🏢 SBU Insights", 
+                    "🌍 Origin Insights"
+                ])
+
+                with tab1:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'ETA' in viz_filtered.columns and 'sheet' in viz_filtered.columns:
+                            try:
+                                eta_df = viz_filtered.dropna(subset=['ETA', 'sheet'])
+                                if not eta_df.empty:
+                                    eta_df['ETA_Date'] = eta_df['ETA'].dt.date
+                                    eta_trend_df = eta_df.groupby(['sheet', 'ETA_Date']).size().reset_index(name='Bookings')
+                                    
+                                    fig_eta = px.line(
+                                        eta_trend_df,
+                                        x='ETA_Date',
+                                        y='Bookings',
+                                        color='sheet',
+                                        title='📆 Bookings Over Time by Sheet',
+                                        markers=True,
+                                        labels={'ETA_Date': 'ETA Date', 'Bookings': 'Number of Bookings'}
+                                    )
+                                    fig_eta.update_layout(
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black'),
+                                        height=500
+                                    )
+                                    st.plotly_chart(fig_eta, use_container_width=True)
+                                else:
+                                    st.warning("No data available after filtering")
+                            except Exception as e:
+                                st.warning(f"Couldn't generate ETA trend chart: {e}")
+                    
+                    with col2:
+                        if 'Delivery date' in viz_filtered.columns:
+                            try:
+                                delivery_df = viz_filtered.copy()
+                                
+                                # Exclude 'globe_cleared' rows if the column exists
+                                if 'globe_cleared' in delivery_df.columns:
+                                    delivery_df = delivery_df[~delivery_df['globe_cleared'].notna()]
+                                
+                                # Determine delivery status
+                                delivery_df['Status'] = 'Pending'  # Default to pending
+                                delivery_df.loc[delivery_df['Delivery date'].notna(), 'Status'] = 'Delivered'
+                                
+                                # Include 'globe_ongoing' in pending if the column exists
+                                if 'globe_ongoing' in delivery_df.columns:
+                                    delivery_df.loc[delivery_df['globe_ongoing'].notna(), 'Status'] = 'Pending'
+                                
+                                # Count statuses
+                                delivery_summary = delivery_df['Status'].value_counts().reset_index()
+                                delivery_summary.columns = ['Status', 'Count']
+                                
+                                # Create the plot
+                                fig_delivery = px.bar(
+                                    delivery_summary,
+                                    x='Status',
+                                    y='Count',
+                                    color='Status',
+                                    title='🚚 Delivery Status Breakdown',
+                                    text='Count',
+                                    category_orders={"Status": ["Delivered", "Pending"]}  # Ensures consistent order
+                                )
+                                
+                                fig_delivery.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black'),
+                                    xaxis_title="Delivery Status",
+                                    yaxis_title="Number of Orders"
+                                )
+                                
+                                # Update color mapping if needed
+                                color_map = {'Delivered': 'green', 'Pending': 'orange'}
+                                fig_delivery.for_each_trace(lambda t: t.update(marker_color=color_map[t.name]))
+                                
+                                st.plotly_chart(fig_delivery, use_container_width=True)
+                                
+                            except Exception as e:
+                                st.warning(f"Couldn't generate delivery status chart: {e}")
+                with tab2:
+                    # Vessel insights using viz_filtered with proper formatting
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'Origin Vessel' in viz_filtered.columns:
+                            try:
+                                vessel_counts = viz_filtered['Origin Vessel'].value_counts().head(10).reset_index()
+                                vessel_counts.columns = ['Vessel', 'Count']
+                                fig_vessel = px.bar(
+                                    vessel_counts,
+                                    x='Vessel',
+                                    y='Count',
+                                    color='Vessel',
+                                    title='Top 10 Vessels by Shipment Count'
+                                )
+                                fig_vessel.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_vessel, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate vessel chart: {e}")
+                    
+                    with col2:
+                        if 'Origin Vessel' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
+                            try:
+                                vessel_weight = viz_filtered.groupby('Origin Vessel')['Gross Weight'].sum().head(6).reset_index()
+                                vessel_weight.columns = ['Vessel', 'Total Weight']
+                                fig_weight = px.pie(
+                                    vessel_weight,
+                                    names='Vessel',
+                                    values='Total Weight',
+                                    title='Weight Distribution by Vessel (Top 6)'
+                                )
+                                fig_weight.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_weight, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate weight chart: {e}")
+
+                with tab3:
+                    # SBU insights using viz_filtered with proper formatting
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'SBU' in viz_filtered.columns:
+                            try:
+                                sbu_counts = viz_filtered['SBU'].value_counts().reset_index()
+                                sbu_counts.columns = ['SBU', 'Count']
+                                fig_sbu = px.bar(
+                                    sbu_counts,
+                                    x='SBU',
+                                    y='Count',
+                                    color='SBU',
+                                    title='Shipments by SBU'
+                                )
+                                fig_sbu.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_sbu, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate SBU chart: {e}")
+                    
+                    with col2:
+                        if 'SBU' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
+                            try:
+                                sbu_weight = viz_filtered.groupby('SBU')['Gross Weight'].sum().reset_index()
+                                sbu_weight.columns = ['SBU', 'Total Weight']
+                                fig_sbu_weight = px.treemap(
+                                    sbu_weight,
+                                    path=['SBU'],
+                                    values='Total Weight',
+                                    title='Weight Distribution by SBU'
+                                )
+                                fig_sbu_weight.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_sbu_weight, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate SBU weight chart: {e}")
+
+                with tab4:
+                    # Origin insights using viz_filtered with proper formatting
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'Origin' in viz_filtered.columns:
+                            try:
+                                origin_counts = viz_filtered['Origin'].value_counts().head(10).reset_index()
+                                origin_counts.columns = ['Origin', 'Count']
+                                fig_origin = px.bar(
+                                    origin_counts,
+                                    x='Origin',
+                                    y='Count',
+                                    color='Origin',
+                                    title='Top 10 Origins by Shipment Count'
+                                )
+                                fig_origin.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_origin, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate origin chart: {e}")
+                    
+                    with col2:
+                        if 'Origin' in viz_filtered.columns and 'Shipper' in viz_filtered.columns:
+                            try:
+                                origin_shipper = viz_filtered.groupby(['Origin', 'Shipper']).size().reset_index(name='Count')
+                                fig_origin_shipper = px.sunburst(
+                                    origin_shipper,
+                                    path=['Origin', 'Shipper'],
+                                    values='Count',
+                                    title='Shipper Distribution by Origin'
+                                )
+                                fig_origin_shipper.update_layout(
+                                    height=500,
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                )
+                                st.plotly_chart(fig_origin_shipper, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Couldn't generate origin-shipper chart: {e}")
+
+
+def show_summary_statistics(df, title):
+    """Helper function to show summary statistics for any DataFrame"""
+    st.write(f"**{title} Summary Statistics**")
+    
+    if df.empty:
+        st.warning("No data available for summary")
+        return
+    
+    # Basic stats
+    cols = st.columns(3)
+    cols[0].metric("Total Records", len(df))
+    cols[1].metric("Columns", len(df.columns))
+    
+    # Show numeric columns stats
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    if len(numeric_cols) > 0:
+        st.write("**Numeric Columns Statistics**")
+        st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+    
+    # Show date columns stats if any
+    date_cols = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+    if len(date_cols) > 0:
+        st.write("**Date Ranges**")
+        date_stats = []
+        for col in date_cols:
+            min_date = df[col].min()
+            max_date = df[col].max()
+            date_stats.append({
+                "Column": col,
+                "Earliest": min_date if pd.notna(min_date) else "N/A",
+                "Latest": max_date if pd.notna(max_date) else "N/A"
+            })
+        st.dataframe(pd.DataFrame(date_stats), use_container_width=True)
+    
+    # Show value counts for categorical columns
+    cat_cols = [col for col in df.columns if df[col].nunique() < 20 and df[col].nunique() > 1]
+    if len(cat_cols) > 0:
+        st.write("**Category Distributions**")
+        for col in cat_cols:
+            st.write(f"**{col}**")
+            st.bar_chart(df[col].value_counts())
+
+
 
 def main():
     st.set_page_config(
@@ -1748,24 +2111,75 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS for better styling
-    st.markdown("""
-    <style>
-        .stButton>button {
-            transition: all 0.3s ease;
-        }
-        .stButton>button:hover {
-            transform: scale(1.02);
-        }
-        .stProgress>div>div>div {
-            background-color: #4CAF50;
-        }
-        [data-testid="stExpander"] {
-            background: rgba(245, 245, 245, 0.1);
-            border-radius: 8px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
+    # Initialize dark mode state
+    if 'dark_mode' not in st.session_state:
+        st.session_state.dark_mode = False
+    
+    # Add dark mode toggle to sidebar (will appear above other sidebar elements)
+    with st.sidebar:
+        dark_mode = st.toggle("🌙 Dark Mode", value=st.session_state.dark_mode)
+        if dark_mode != st.session_state.dark_mode:
+            st.session_state.dark_mode = dark_mode
+            st.rerun()
+    
+    # Apply appropriate CSS based on mode
+    if st.session_state.dark_mode:
+        dark_css = """
+        <style>
+            /* Dark mode styles */
+            .stApp {
+                background-color: #0E1117;
+                color: #FAFAFA;
+            }
+            [data-testid="stSidebar"] {
+                background-color: #0E1117 !important;
+            }
+            .stMarkdown, .stText, h1, h2, h3, h4, h5, h6 {
+                color: #FAFAFA !important;
+            }
+            .dataframe {
+                background-color: #0E1117 !important;
+                color: #FAFAFA !important;
+            }
+            [data-testid="stExpander"] {
+                background: rgba(30, 30, 30, 0.8) !important;
+                border-color: #444 !important;
+            }
+            /* Your existing button styles - modified for dark mode */
+            .stButton>button {
+                transition: all 0.3s ease;
+                background-color: #4F8BF9;
+                color: white !important;
+            }
+            .stButton>button:hover {
+                transform: scale(1.02);
+                background-color: #3a7de9;
+            }
+            .stProgress>div>div>div {
+                background-color: #4CAF50;
+            }
+        </style>
+        """
+        st.markdown(dark_css, unsafe_allow_html=True)
+    else:
+        # Light mode CSS (your original styles)
+        st.markdown("""
+        <style>
+            .stButton>button {
+                transition: all 0.3s ease;
+            }
+            .stButton>button:hover {
+                transform: scale(1.02);
+            }
+            .stProgress>div>div>div {
+                background-color: #4CAF50;
+            }
+            [data-testid="stExpander"] {
+                background: rgba(245, 245, 245, 0.1);
+                border-radius: 8px;
+            }
+        </style>
+        """, unsafe_allow_html=True)
     
     if 'config_manager' not in st.session_state:
         st.session_state.config_manager = ConfigurationManager()
@@ -1783,3 +2197,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
