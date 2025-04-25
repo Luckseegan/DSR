@@ -35,6 +35,8 @@
         "REMARK",
         "Delivery date",
         "Delivery location",
+        "CUSDEC No",
+        "CUSDEC Date",
         "sheet"
     ],
     "mappings": {
@@ -65,7 +67,9 @@
                 "Bond or Non Bond": "BOND/Non BOND",
                 "REMARK": "Comments",
                 "Delivery date": "Delivery Date",
-                "Delivery location": "Location"
+                "Delivery location": "Location",
+                "CUSDEC No": 48,
+                "CUSDEC Date": "Cusdec Date"
             },
             "non_bond": {
                 "HBL": "HBL",
@@ -93,7 +97,9 @@
                 "Container No.": "Container No",
                 "Shipper": "Supplier( Name as for the Invoice)",
                 "Type": "TYPE (IN TWO LETTERS)",
-                "SBU": "Consignee"
+                "SBU": "Consignee",
+                "CUSDEC No": 50,
+                "CUSDEC Date": "CUSDEC SUBMITTED DATE"
             },
             "fcl": {
                 "HBL": "HBL",
@@ -121,7 +127,9 @@
                 "Container No.": "Container No",
                 "Shipper": "Supplier( Name as for the Invoice)",
                 "Type": 14,
-                "SBU": "Consignee"
+                "SBU": "Consignee",
+                "CUSDEC No": "Cusdec No.",
+                "CUSDEC Date": "CUSDEC SUBMITTED DATE"
             }
         },
         "maersk": {
@@ -150,7 +158,9 @@
                 "Origin Vessel": 24,
                 "Connecting vessel": 25,
                 "Type": 15,
-                "SBU": "Consignee"
+                "SBU": "Consignee",
+                "CUSDEC No": "Cusdec No.",
+                "CUSDEC Date": "CUSDEC SUBMITTED DATE"
             },
             "archived": {
                 "ATA": "ATA",
@@ -177,12 +187,14 @@
                 "Origin Vessel": 24,
                 "Connecting vessel": 25,
                 "Type": 15,
-                "SBU": "Consignee"
+                "SBU": "Consignee",
+                "CUSDEC No": "Cusdec No.",
+                "CUSDEC Date": "CUSDEC SUBMITTED DATE"
             }
         },
         "globe": {
             "ongoing": {
-                "ETA": "ETA",
+                "ETA": "ETA DATE",
                 "PO #": "PO #",
                 "ATA": null,
                 "ATD": null,
@@ -211,10 +223,11 @@
                 "Shipper": "SHIPPER",
                 "Status": "STATUS",
                 "Type": null,
-                "Voyage No": null
+                "Voyage No": null,
+                "CUSDEC No": "ENTRY # / DATE"
             },
             "cleared": {
-                "ETA": "ETA",
+                "ETA": "ETA DATE",
                 "PO #": "PO #",
                 "ATA": null,
                 "ATD": null,
@@ -243,7 +256,8 @@
                 "Shipper": "SHIPPER",
                 "Status": "STATUS",
                 "Type": null,
-                "Voyage No": null
+                "Voyage No": null,
+                "CUSDEC No": "ENTRY #"
             }
         },
         "scanwell": {
@@ -277,7 +291,8 @@
                 "SBU": 3,
                 "Shipper": "Supplier",
                 "Status": "Pre Alert Status",
-                "Type": "CTN Type"
+                "Type": "CTN Type",
+                "CUSDEC No": "Cusdec No"
             },
             "bodyline": {
                 "ETA": "ETA",
@@ -309,7 +324,8 @@
                 "SBU": 3,
                 "Shipper": "Supplier",
                 "Status": "Pre Alert Status",
-                "Type": "CTN Type"
+                "Type": "CTN Type",
+                "CUSDEC No": "Cusdec No"
             }
         }
     },
