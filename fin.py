@@ -2,8 +2,18 @@ import streamlit as st
 import pandas as pd
 from datetime import timedelta
 from rapidfuzz import process, fuzz
-import time
+import re
+from datetime import datetime
 import plotly.express as px
+# Add these imports at the top
+from auth import AuthManager
+import streamlit_authenticator as stauth
+import requests
+from io import BytesIO
+import time
+import difflib
+
+import tempfile
 
 
 
@@ -14,6 +24,8 @@ import json
 from pathlib import Path
 import streamlit as st
 import pandas as pd
+
+auth = AuthManager()
 
 class ConfigurationManager:
     _instance = None
@@ -311,14 +323,6 @@ class ConfigurationManager:
             st.error(f"Error saving config: {str(e)}")
             return False
 
-    # def save_config(self):
-    #     try:
-    #         with open(self.config_path, "w") as f:
-    #             json.dump(self.config, f, indent=4)
-    #         return True
-    #     except Exception as e:
-    #         st.error(f"Error saving config: {str(e)}")
-    #         return False
             
     def get_all_columns(self):
         """Combine required and optional columns"""
@@ -1440,108 +1444,324 @@ def show_scanwell_summary(final_df):
 # ========================
 # UI COMPONENTS
 # ========================
-def show_sidebar():
-    with st.sidebar:
-        #st.image("https://via.placeholder.com/150x50?text=DSR+Processor", width=150)  # Add your logo here
-        
-        # Configuration Section
-        config_expander = st.expander("⚙️ CONFIGURATION", expanded=False)
-        with config_expander:
-            if st.button("🛠️ Open Settings Panel"):
-                st.session_state.show_config = not st.session_state.get('show_config', False)
-            
-            if st.session_state.get('show_config', False):
-                show_configuration_ui()
-        
-        st.markdown("---")
-        st.subheader("🛠️ Processing Parameters")
-        
-        # Add date filtering toggle
-        st.session_state.use_date_filter = st.checkbox(
-            "Enable Date Filtering",
-            value=False,
-            help="Filter records by date range when enabled"
+
+import streamlit as st
+import pandas as pd
+import pandas as pd
+import numpy as np
+from rapidfuzz import fuzz
+import re
+
+def process_dsr_merchant_data_original(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and transform DSR merchant data for standardized output."""
+
+    # --- Helper Functions ---
+    def clean_status(status, sheet):
+        if pd.isna(status) and sheet.lower() == 'expo_fcl':
+            return 'FCL'
+        status = str(status).strip().upper()
+        return status if status in ['FCL', 'LCL'] else np.nan
+
+    def clean_bond_status(row):
+        val = str(row['Bond or Non Bond']).strip().upper().replace('-', '').replace('_', '').replace(' ', '')
+        if val == 'BOND':
+            return 'BOND'
+        elif val in ['NONBOND', 'FCL']:
+            return 'NON-BOND'
+        if 'maersk' in row['sheet'].lower() or 'globe' in row['sheet'].lower():
+            return 'NON-BOND'
+        if 'scanwell' in row['sheet'].lower() and isinstance(row['Port'], str):
+            if any(port in row['Port'].upper() for port in ['SHENZHEN', 'HKG']):
+                return 'BOND'
+        return np.nan
+
+    def fill_origin_vessel(row):
+        return row['Connecting vessel'] if pd.isna(row['Origin Vessel']) and pd.notna(row['Connecting vessel']) else row['Origin Vessel']
+
+    def clean_vessel_name(name):
+        if not isinstance(name, str):
+            return ""
+        name = re.sub(r'[\/"\'\.]', ' ', name)
+        name = re.sub(r'\s+', ' ', name).strip()
+        name = re.sub(r'(\d{2,})(\1)', r'\1', name)
+        return name.upper()
+
+    def group_similar_names(names, threshold=80):
+        visited = set()
+        groups = []
+        for i, base in enumerate(names):
+            if base in visited:
+                continue
+            group = [base]
+            visited.add(base)
+            for candidate in names[i+1:]:
+                if candidate not in visited and fuzz.token_set_ratio(base, candidate) >= threshold:
+                    group.append(candidate)
+                    visited.add(candidate)
+            if len(group) > 1:
+                groups.append(group)
+        return groups
+
+    def compute_clearance(row):
+        if pd.isna(row['ATA']):
+            return pd.NaT
+        status = str(row.get('LCL,FCL Status', '')).strip().upper()
+        days = 5 if status == 'LCL' else 3 if status == 'FCL' else None
+        return row['ATA'] + pd.Timedelta(days=days) if days else pd.NaT
+
+    # --- Cleaning Steps ---
+    df = df.copy()
+
+    # Clean LCL/FCL status
+    df['LCL,FCL Status'] = df.apply(lambda row: clean_status(row['LCL,FCL Status'], row['sheet']), axis=1)
+
+    # Clean Bond/Non-Bond
+    df['Bond or Non Bond'] = df.apply(clean_bond_status, axis=1)
+
+    # Fill missing Origin Vessel
+    df['Origin Vessel'] = df.apply(fill_origin_vessel, axis=1)
+
+    # Combine and clean vessel+voyage info
+    df['Vessel_Voyage'] = df['Origin Vessel'].fillna('').astype(str) + ' ' + df['Voyage No'].fillna('').astype(str)
+    df['Vessel_Voyage_Cleaned'] = df['Vessel_Voyage'].apply(clean_vessel_name)
+
+    # Standardize vessel names
+    unique_cleaned = df['Vessel_Voyage_Cleaned'].dropna().unique()
+    groups = group_similar_names(list(unique_cleaned))
+    name_map = {variant: group[0] for group in groups for variant in group}
+    df['Vessel_Voyage_Standard'] = df['Vessel_Voyage_Cleaned'].map(name_map).fillna(df['Vessel_Voyage_Cleaned'])
+
+    # Move standardized vessel before 'Origin Vessel'
+    cols = df.columns.tolist()
+    if 'Vessel_Voyage_Standard' in cols and 'Origin Vessel' in cols:
+        cols.insert(cols.index('Origin Vessel'), cols.pop(cols.index('Vessel_Voyage_Standard')))
+        df = df[cols]
+
+    # Process ETA, ATD, ATA, ETB
+    for col in ['ETA', 'ATD']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+
+    if 'ETA' in df.columns and 'ATD' in df.columns:
+        eta_col = df.pop('ETA')
+        df.insert(df.columns.get_loc('ATD') + 1, 'ETA', eta_col)
+
+    df['ATA'] = df['ETA'] + pd.Timedelta(days=1)
+    df['ETB'] = df['ATA'] + pd.Timedelta(days=1)
+    df['Estimated Clearance'] = df.apply(compute_clearance, axis=1)
+
+    return df
+
+import pdfplumber
+from rapidfuzz import fuzz, process
+from datetime import datetime, timedelta
+
+def extract_pdf_tables(pdf_path: str) -> pd.DataFrame:
+    """Extract and standardize tables from PDF meeting minutes"""
+    required_columns = [
+        'VESSEL & VOYAGE', 'ORIGIN', 'ETD', 'BOOKING ETA', 'FORECAST ETA', 'CURRENT STATUS'
+    ]
+    
+    def normalize_column(name):
+        if name is None:
+            return ""
+        return (
+            str(name).strip()
+            .lower()
+            .replace('\u200b', '')
+            .replace('\xa0', ' ')
+            .replace('\n', ' ')
         )
-        
-        # Only show date selection if filtering is enabled
-        if st.session_state.use_date_filter:
-            weeks = config_manager.config["global"]["date_range_weeks"]
-            selected_date = st.date_input(
-                "📅 Reference Date for Shipments",
-                value=st.session_state.selected_reference_date,
-                help=f"Will show shipments within ±{weeks} weeks of this date"
+
+    def map_columns_with_similarity(actual_columns, expected_columns, fuzzy_threshold=85):
+        mapped = {}
+        normalized_actual = {normalize_column(col): col for col in actual_columns}
+
+        for expected_col in expected_columns:
+            norm_expected = normalize_column(expected_col)
+
+            # Exact match
+            if norm_expected in normalized_actual:
+                original_col = normalized_actual[norm_expected]
+                mapped[original_col] = expected_col
+                continue
+
+            # Fuzzy fallback
+            match, score, _ = process.extractOne(
+                norm_expected, normalized_actual.keys(), scorer=fuzz.token_sort_ratio
             )
-            st.session_state.selected_reference_date = pd.Timestamp(selected_date)
+            if score >= fuzzy_threshold:
+                original_col = normalized_actual[match]
+                mapped[original_col] = expected_col
+
+        return mapped
+
+    def clean_and_merge_tables(tables, required_columns):
+        clean_tables = []
+
+        for i, table in enumerate(tables):
+            if not isinstance(table, pd.DataFrame) or table.empty:
+                continue
+
+            # Handle 'ORIGIN' and 'Loading Port' columns
+            col_norm = [normalize_column(c) for c in table.columns]
+            has_origin = any('origin' == c for c in col_norm)
+            has_loading_port = any('loading port' == c for c in col_norm)
+
+            if has_loading_port:
+                loading_port_col = next(c for c in table.columns if normalize_column(c) == 'loading port')
+                table['ORIGIN'] = table[loading_port_col]
+            elif has_origin:
+                origin_col = next(c for c in table.columns if normalize_column(c) == 'origin')
+                table['ORIGIN'] = table[origin_col]
+
+            mapping = map_columns_with_similarity(table.columns, required_columns)
+            if not mapping:
+                continue
+
+            # Rename and filter
+            table = table.rename(columns=mapping)
+            valid_cols = [col for col in required_columns if col in table.columns]
+            table = table[valid_cols]
+            clean_tables.append(table)
+
+        return pd.concat(clean_tables, ignore_index=True) if clean_tables else pd.DataFrame(columns=required_columns)
+
+    # Extract tables from PDF
+    tables = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            page_tables = page.extract_tables()
+            for table_data in page_tables:
+                df = pd.DataFrame(table_data[1:], columns=table_data[0])
+                tables.append(df)
+
+    # Clean and merge tables
+    merged_df = clean_and_merge_tables(tables, required_columns)
+    
+    # Clean the final dataframe
+    if not merged_df.empty:
+        merged_df = merged_df[merged_df['VESSEL & VOYAGE'].notna()]
+        merged_df = merged_df[merged_df['VESSEL & VOYAGE'].str.strip() != '']
         
-        # Fuzzy Threshold with visual indicator
-        threshold = config_manager.config["global"]["fuzzy_threshold"]
-        st.progress(threshold/100, text=f"🔍 Fuzzy Matching Threshold: {threshold}%")
-        
-        st.markdown("---")
-        st.subheader("📋 Processing Pipeline")
-        
-        # Enhanced progress tracker
-        steps = [
-            (1, "1. Expo Data", st.session_state.expo_processed),
-            (2, "2. Maersk Data", st.session_state.maersk_processed),
-            (3, "3. Globe Data", st.session_state.globe_processed),
-            (4, "4. Scanwell Data", st.session_state.scanwell_processed),
-            (5, "5. Final Results", all([
-                st.session_state.expo_processed,
-                st.session_state.maersk_processed,
-                st.session_state.globe_processed,
-                st.session_state.scanwell_processed
-            ]))
-        ]
-        
-        for step_num, step_name, is_complete in steps:
-            if st.session_state.current_step == step_num:
-                st.markdown(f"➡️ **{step_name}** (Current Step)")
-            elif is_complete:
-                st.markdown(f"✅ ~~{step_name}~~ (Completed)")
+        # Clean vessel names
+        merged_df['VESSEL_CLEAN'] = merged_df['VESSEL & VOYAGE'].apply(
+            lambda x: re.sub(r'[^a-zA-Z0-9\s]', '', str(x)).strip().upper()
+        )
+    
+    return merged_df
+
+
+def match_vessels(processed_df: pd.DataFrame, pdf_df: pd.DataFrame) -> pd.DataFrame:
+    """Enhanced vessel matching with robust error handling"""
+    if pdf_df.empty or processed_df.empty:
+        return processed_df
+    
+    # Ensure we have the required columns
+    if 'VESSEL_CLEAN' not in pdf_df.columns or 'Vessel_Voyage_Standard' not in processed_df.columns:
+        print("Missing required columns for matching")
+        return processed_df
+    
+    # Get unique vessels from both sources
+    pdf_vessels = [str(v).strip().upper() for v in pdf_df['VESSEL_CLEAN'].unique() if pd.notna(v)]
+    processed_vessels = [str(v).strip().upper() for v in processed_df['Vessel_Voyage_Standard'].unique() if pd.notna(v)]
+    
+    print(f"\nMatching {len(processed_vessels)} processed vessels against {len(pdf_vessels)} PDF vessels")
+    
+    # Create mapping dictionary with similarity scores
+    vessel_map = {}
+    similarity_scores = {}
+    
+    for vessel in processed_vessels:
+        try:
+            result = process.extractOne(
+                vessel, 
+                pdf_vessels, 
+                scorer=fuzz.token_sort_ratio,
+                score_cutoff=60  # Lower threshold to catch more matches
+            )
+            
+            if result is not None:
+                match, score, _ = result
+                if score >= 60:  # Only consider good enough matches
+                    vessel_map[vessel] = match
+                    similarity_scores[vessel] = score
+        except Exception as e:
+            print(f"Error matching vessel {vessel}: {str(e)}")
+            continue
+    
+    print(f"\nFound {len(vessel_map)} matches")
+    if vessel_map:
+        print("Sample matches:")
+        for vessel, match in list(vessel_map.items())[:5]:
+            print(f"- {vessel} → {match} (score: {similarity_scores[vessel]})")
+    
+    # Add PDF data to processed dataframe
+    processed_df['PDF_VESSEL_MATCH'] = processed_df['Vessel_Voyage_Standard'].str.strip().str.upper().map(vessel_map)
+    processed_df['MATCH_SCORE'] = processed_df['Vessel_Voyage_Standard'].str.strip().str.upper().map(similarity_scores)
+    
+    return processed_df
+
+
+def process_dsr_merchant_data(df: pd.DataFrame, pdf_path: str = None) -> pd.DataFrame:
+    """Enhanced processing with PDF integration and debugging"""
+    # Original processing steps
+    df = process_dsr_merchant_data_original(df)
+    
+    # PDF extraction and matching if path provided
+    if pdf_path:
+        try:
+            print("\nStarting PDF processing...")
+            pdf_df = extract_pdf_tables(pdf_path)
+            
+            if not pdf_df.empty:
+                print("PDF data successfully extracted")
+                df = match_vessels(df, pdf_df)
+                
+                # Enhanced timeline processing with PDF data
+                if 'BOOKING ETA' in df.columns:
+                    df['ETA'] = pd.to_datetime(df['BOOKING ETA'], errors='coerce')
+                if 'FORECAST ETA' in df.columns:
+                    df['ETA'] = df['ETA'].fillna(pd.to_datetime(df['FORECAST ETA'], errors='coerce'))
+                
+                # Recalculate timelines
+                df['ATA'] = df['ETA'] + timedelta(days=1)
+                df['ETB'] = df['ATA'] + timedelta(days=1)
+                df['Estimated Clearance'] = df.apply(compute_clearance, axis=1)
+                
+                print("PDF processing completed successfully")
+                
             else:
-                st.markdown(f"◻️ {step_name}")
-        
-        # Navigation controls with better icons
-        if st.session_state.current_step > 1 and st.session_state.current_step < 5:
-            if st.button("⏮️ Previous Step"):
-                st.session_state.current_step -= 1
-                st.rerun()
-        
-        # Final step actions
-        if st.session_state.current_step == 5:
-            st.markdown("---")
-            st.subheader("📤 Export Results")
-            combined = pd.concat([
-                st.session_state.expo_data,
-                st.session_state.maersk_data,
-                st.session_state.globe_data,
-                st.session_state.scanwell_data
-            ], ignore_index=True)
-            
-            csv = combined.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="💾 Download Complete Dataset",
-                data=csv,
-                file_name='dsr_combined_results.csv',
-                mime='text/csv',
-                help="Download all processed data as a single CSV file"
-            )
-            
-            if st.button("🔄 Start New Processing Run", type="primary"):
-                init_session_state()
-                st.rerun()
+                print("No data extracted from PDF")
+                
+        except Exception as e:
+            print(f"PDF processing error: {str(e)}")
+            st.error(f"PDF processing error: {str(e)}")
+    
+    return df
+
+
+def compute_clearance(row):
+    if pd.isna(row['ATA']):
+        return pd.NaT
+    status = str(row.get('LCL,FCL Status', '')).strip().upper()
+    days = 5 if status == 'LCL' else 3 if status == 'FCL' else None
+    return row['ATA'] + pd.Timedelta(days=days) if days else pd.NaT
+
+
+
 
 def show_current_step():
     st.title("📊 Piyadasa-DSR Data Processor")
     st.caption("Process and combine shipment data from multiple sources")
-    
-    # Add a button to jump directly to visualization step
-    if st.session_state.current_step != 5:
-        if st.button("🚀 Jump to Visualization Step", type="secondary"):
-            st.session_state.current_step = 5
-            st.rerun()
-    
+
+    step = st.selectbox("🔢 Jump to Step", [1, 2, 3, 4, 5], index=st.session_state.current_step - 1)
+    if step != st.session_state.current_step:
+        st.session_state.current_step = step
+        st.rerun()
+
+
+  
     current_step = st.session_state.current_step
 
     # Step 1: Expo Data
@@ -1640,423 +1860,759 @@ def show_current_step():
         with st.container(border=True):
             st.subheader("📊 Data Visualization & Analysis")
             
-            # Initialize combined as empty DataFrame
-            combined = pd.DataFrame()
-            
-            # Add option to use existing merged data or upload new
-            analysis_option = st.radio(
-                "Choose data source:",
-                options=["Use previously processed data", "Upload new file for analysis"],
-                index=0,
-                horizontal=True
-            )
-            
-            if analysis_option == "Upload new file for analysis":
-                quick_file = st.file_uploader(
-                    "Upload any Excel/CSV for analysis",
-                    type=['xlsx', 'xls', 'csv'],
-                    key='quick_analysis'
+            analysis_tab, consolidated_tab = st.tabs(["🔍 Data Analysis", "🚢 Consolidated Shipments"])
+
+            with analysis_tab:
+
+                # Initialize combined as empty DataFrame
+                combined = pd.DataFrame()
+                
+                # Add option to use existing merged data, upload new, or fetch from Google Sheets
+                analysis_option = st.radio(
+                    "Choose data source:",
+                    options=["Fetch from Google Sheets", "Use previously processed data", "Upload new file for analysis"],
+                    index=0,  # Default to Google Sheets
+                    horizontal=True
                 )
                 
-                if quick_file:
+                if analysis_option == "Fetch from Google Sheets":
                     try:
-                        if quick_file.name.endswith('.csv'):
-                            combined = pd.read_csv(quick_file)
-                        else:
-                            combined = pd.read_excel(quick_file)
-                        st.success("File uploaded successfully!")
+                        import requests
+                        from io import BytesIO
+                        import urllib3
+                        
+                        # Disable SSL verification warnings (not recommended for production)
+                        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                        
+                        # Google Sheets URL (published to web as XLSX)
+                        google_sheets_url = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx'
+                        
+                        # Read data from Google Sheets with SSL verification disabled
+                        response = requests.get(google_sheets_url, verify=False)
+                        combined = pd.read_excel(BytesIO(response.content))
+                        st.success("✅ Data fetched from Google Sheets successfully!")
+                        
                     except Exception as e:
-                        st.error(f"Error reading file: {str(e)}")
-            else:
-                # Use existing processed data
-                if (st.session_state.expo_processed or st.session_state.maersk_processed or 
-                    st.session_state.globe_processed or st.session_state.scanwell_processed):
-                    combined = pd.concat([
-                        st.session_state.expo_data,
-                        st.session_state.maersk_data,
-                        st.session_state.globe_data,
-                        st.session_state.scanwell_data
-                    ], ignore_index=True)
-                else:
-                    st.warning("No processed data available - please upload files in previous steps")
+                        st.error(f"Failed to fetch data from Google Sheets: {str(e)}")
+
             
-            # Only proceed if we have data
-            if not combined.empty:
-                st.success(f"✨ Data loaded! Total records: {len(combined):,}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Unique HBLs", combined['HBL'].nunique())
-                with col2:
-                    # Normalize column names
-                    combined.columns = [col.strip() for col in combined.columns]
-                    gross_weight_col = next(
-                        (col for col in combined.columns if col.lower().replace(" ", "") == "grossweight"), 
-                        None
+                elif analysis_option == "Upload new file for analysis":
+                    quick_file = st.file_uploader(
+                        "Upload any Excel/CSV for analysis",
+                        type=['xlsx', 'xls', 'csv'],
+                        key='quick_analysis'
                     )
-                    if gross_weight_col:
+                    
+                    if quick_file:
                         try:
-                            combined[gross_weight_col] = (
-                                pd.to_numeric(
-                                    combined[gross_weight_col]
-                                    .astype(str)
-                                    .str.replace(",", "")
-                                    .str.extract(r"(\d+\.?\d*)")[0],
-                                    errors='coerce'
-                                )
-                            )
-                            total_weight = combined[gross_weight_col].sum()
-                            st.metric("Total Gross Weight", f"{total_weight:,.2f} kg")
+                            if quick_file.name.endswith('.csv'):
+                                combined = pd.read_csv(quick_file)
+                            else:
+                                combined = pd.read_excel(quick_file)
+                            #st.success("File uploaded successfully!")
                         except Exception as e:
-                            st.metric("Total Gross Weight", f"Error: {str(e)}")
+                            st.error(f"Error reading file: {str(e)}")
+                else:
+                    # FLEXIBLE MERGING: Use any available processed data
+                    data_sources = []
+
+                    if st.session_state.get('expo_processed'):
+                        data_sources.append(st.session_state.expo_data)
+
+                    if st.session_state.get('maersk_processed'):
+                        data_sources.append(st.session_state.maersk_data)
+
+                    if st.session_state.get('globe_processed'):
+                        data_sources.append(st.session_state.globe_data)
+
+                    if st.session_state.get('scanwell_processed'):
+                        data_sources.append(st.session_state.scanwell_data)
+
+                    if data_sources:
+                        combined = pd.concat(data_sources, ignore_index=True)
                     else:
-                        st.metric("Total Gross Weight", "Column not found")
+                        st.warning("⚠️ No processed data available - please upload files in previous steps")
 
-                # Filter block
-                st.markdown("### 🔎 Filter Records")
-                filter_col1, filter_col2 = st.columns(2)
+                # Only proceed if we have data
+                if not combined.empty:
+                    st.success(f"✨ Data loaded! Total records: {len(combined):,}")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Unique HBLs", combined['HBL'].nunique())
+                    with col2:
+                        # Normalize column names
+                        combined.columns = [col.strip() for col in combined.columns]
+                        gross_weight_col = next(
+                            (col for col in combined.columns if col.lower().replace(" ", "") == "grossweight"), 
+                            None
+                        )
+                        if gross_weight_col:
+                            try:
+                                combined[gross_weight_col] = (
+                                    pd.to_numeric(
+                                        combined[gross_weight_col]
+                                        .astype(str)
+                                        .str.replace(",", "")
+                                        .str.extract(r"(\d+\.?\d*)")[0],
+                                        errors='coerce'
+                                    )
+                                )
+                                total_weight = combined[gross_weight_col].sum()
+                                st.metric("Total Gross Weight", f"{total_weight:,.2f} kg")
+                            except Exception as e:
+                                st.metric("Total Gross Weight", f"Error: {str(e)}")
+                        else:
+                            st.metric("Total Gross Weight", "Column not found")
 
-                with filter_col1:
-                    selected_hbls = st.multiselect(
-                        "Filter by HBL",
-                        options=combined['HBL'].dropna().unique(),
-                        default=None
-                    )
+                    # Filter block
+                    st.markdown("### 🔎 Filter Records")
+                    filter_col1, filter_col2 = st.columns(2)
 
-                with filter_col2:
-                    selected_invs = st.multiselect(
-                        "Filter by Inv #",
-                        options=combined['Inv #'].dropna().unique(),
-                        default=None
-                    )
-
-                filtered_combined = combined.copy()
-                if selected_hbls:
-                    filtered_combined = filtered_combined[filtered_combined['HBL'].isin(selected_hbls)]
-                if selected_invs:
-                    filtered_combined = filtered_combined[filtered_combined['Inv #'].isin(selected_invs)]
-
-                st.info(f"🔍 Showing {len(filtered_combined):,} filtered records")
-
-                # Show filtered data
-                if not filtered_combined.empty:
-                    with st.expander("🔍 View Filtered Data", expanded=False):
-                        st.dataframe(
-                            filtered_combined,
-                            use_container_width=True,
-                            height=400
+                    with filter_col1:
+                        selected_hbls = st.multiselect(
+                            "Filter by HBL",
+                            options=combined['HBL'].dropna().unique(),
+                            default=None
                         )
 
-                # Visualizations organized in tabs
-                st.markdown("---")
-                st.subheader("📊 Additional Visual Insights")
-                
-                # Initialize date filter variables
-                viz_filtered = filtered_combined.copy()
-                
-                if 'ETA' in filtered_combined.columns:
-                    try:
-                        # Ensure ETA is datetime and drop NA values
-                        filtered_combined['ETA'] = pd.to_datetime(filtered_combined['ETA'], errors='coerce')
-                        valid_dates = filtered_combined.dropna(subset=['ETA'])
-                        
-                        if not valid_dates.empty:
-                            min_date = valid_dates['ETA'].min().date()
-                            max_date = valid_dates['ETA'].max().date()
+                    with filter_col2:
+                        selected_invs = st.multiselect(
+                            "Filter by Inv #",
+                            options=combined['Inv #'].dropna().unique(),
+                            default=None
+                        )
+
+                    filtered_combined = combined.copy()
+                    if selected_hbls:
+                        filtered_combined = filtered_combined[filtered_combined['HBL'].isin(selected_hbls)]
+                    if selected_invs:
+                        filtered_combined = filtered_combined[filtered_combined['Inv #'].isin(selected_invs)]
+
+                    st.info(f"🔍 Showing {len(filtered_combined):,} filtered records")
+
+                    # Show filtered data
+                    if not filtered_combined.empty:
+                        with st.expander("🔍 View Filtered Data", expanded=False):
+                            st.dataframe(
+                                filtered_combined,
+                                use_container_width=True,
+                                height=400
+                            )
+
+                    # Visualizations organized in tabs
+                    st.markdown("---")
+                    st.subheader("📊 Additional Visual Insights")
+                    
+                    # Initialize date filter variables
+                    viz_filtered = filtered_combined.copy()
+                    
+                    if 'ETA' in filtered_combined.columns:
+                        try:
+                            # Ensure ETA is datetime and drop NA values
+                            filtered_combined['ETA'] = pd.to_datetime(filtered_combined['ETA'], errors='coerce')
+                            valid_dates = filtered_combined.dropna(subset=['ETA'])
                             
-                            # Initialize session state for dates
-                            if 'date_filter' not in st.session_state:
-                                st.session_state.date_filter = {
-                                    'start_date': min_date,
-                                    'end_date': max_date
-                                }
-                            
-                            # Date filter section for visualizations
-                            st.markdown("### ⏳ Filter Visualizations by Date Range")
-                            date_col1, date_col2, date_col3 = st.columns([2, 2, 1])
-                            
-                            with date_col1:
-                                start_date = st.date_input(
-                                    "Start Date",
-                                    value=st.session_state.date_filter['start_date'],
-                                    min_value=min_date,
-                                    max_value=max_date,
-                                    key='viz_start_date'
-                                )
-                            
-                            with date_col2:
-                                end_date = st.date_input(
-                                    "End Date",
-                                    value=st.session_state.date_filter['end_date'],
-                                    min_value=min_date,
-                                    max_value=max_date,
-                                    key='viz_end_date'
-                                )
-                            
-                            with date_col3:
-                                st.write("")  # Spacer for alignment
-                                if st.button("🔄 Reset Dates", key="reset_viz_dates"):
+                            if not valid_dates.empty:
+                                min_date = valid_dates['ETA'].min().date()
+                                max_date = valid_dates['ETA'].max().date()
+                                
+
+                                if 'date_filter' not in st.session_state:
+                                    default_start = max(min_date, max_date - timedelta(days=30))
                                     st.session_state.date_filter = {
-                                        'start_date': min_date,
+                                        'start_date': default_start,
                                         'end_date': max_date
                                     }
-                                    st.rerun()
-                            
-                            # Update session state if dates changed
-                            if (start_date != st.session_state.date_filter['start_date'] or 
-                                end_date != st.session_state.date_filter['end_date']):
-                                st.session_state.date_filter = {
-                                    'start_date': start_date,
-                                    'end_date': end_date
-                                }
-                                st.rerun()
-                            
-                            # Apply date filter to all visualizations
-                            viz_filtered = filtered_combined[
-                                (filtered_combined['ETA'].dt.date >= st.session_state.date_filter['start_date']) & 
-                                (filtered_combined['ETA'].dt.date <= st.session_state.date_filter['end_date'])
-                            ]
-                            
-                            # Show record count instead of date range
-                            st.info(f"📊 Showing {len(viz_filtered):,} records")
-                        else:
-                            st.warning("No valid dates available in ETA column")
-                            viz_filtered = filtered_combined
-                            
-                    except Exception as e:
-                        st.warning(f"Couldn't process dates: {e}")
-                        viz_filtered = filtered_combined
-                else:
-                    viz_filtered = filtered_combined
-                
-                # Visualization tabs - ALL using viz_filtered with proper formatting
-                tab1, tab2, tab3, tab4 = st.tabs([
-                    "📅 Time Trends", 
-                    "🚢 Vessel Insights", 
-                    "🏢 SBU Insights", 
-                    "🌍 Origin Insights"
-                ])
+                                    st.session_state.pop('viz_start_date', None)
+                                    st.session_state.pop('viz_end_date', None)
 
-                with tab1:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if 'ETA' in viz_filtered.columns and 'sheet' in viz_filtered.columns:
-                            try:
-                                eta_df = viz_filtered.dropna(subset=['ETA', 'sheet'])
-                                if not eta_df.empty:
-                                    eta_df['ETA_Date'] = eta_df['ETA'].dt.date
-                                    eta_trend_df = eta_df.groupby(['sheet', 'ETA_Date']).size().reset_index(name='Bookings')
-                                    
-                                    fig_eta = px.line(
-                                        eta_trend_df,
-                                        x='ETA_Date',
-                                        y='Bookings',
-                                        color='sheet',
-                                        title='📆 Bookings Over Time by Sheet',
-                                        markers=True,
-                                        labels={'ETA_Date': 'ETA Date', 'Bookings': 'Number of Bookings'}
+                                # Date filter section for visualizations
+                                st.markdown("### ⏳ Filter Visualizations by Date Range")
+                                date_col1, date_col2, date_col3 = st.columns([2, 2, 1])
+                                
+                                date_key_suffix = f"{min_date}_{max_date}"
+
+                                with date_col1:
+                                    start_date = st.date_input(
+                                        "Start Date",
+                                        value=st.session_state.date_filter['start_date'],
+                                        min_value=min_date,
+                                        max_value=max_date,
+                                        key=f'viz_start_date_{date_key_suffix}'
                                     )
-                                    fig_eta.update_layout(
+
+                                with date_col2:
+                                    end_date = st.date_input(
+                                        "End Date",
+                                        value=st.session_state.date_filter['end_date'],
+                                        min_value=min_date,
+                                        max_value=max_date,
+                                        key=f'viz_end_date_{date_key_suffix}'
+                                    )
+
+                                
+                                with date_col3:
+                                    st.write("")  # Spacer for alignment
+                                    if st.button("🔄 Reset Dates", key="reset_viz_dates"):
+                                        st.session_state.date_filter = {
+                                            'start_date': min_date,
+                                            'end_date': max_date
+                                        }
+                                        st.rerun()
+                                
+                                # Update session state if dates changed
+                                if (start_date != st.session_state.date_filter['start_date'] or 
+                                    end_date != st.session_state.date_filter['end_date']):
+                                    st.session_state.date_filter = {
+                                        'start_date': start_date,
+                                        'end_date': end_date
+                                    }
+                                    st.rerun()
+                                
+                                # Apply date filter to all visualizations
+                                viz_filtered = filtered_combined[
+                                    (filtered_combined['ETA'].dt.date >= st.session_state.date_filter['start_date']) & 
+                                    (filtered_combined['ETA'].dt.date <= st.session_state.date_filter['end_date'])
+                                ]
+                                
+                                # Show record count instead of date range
+                                st.info(f"📊 Showing {len(viz_filtered):,} records")
+                            else:
+                                st.warning("No valid dates available in ETA column")
+                                viz_filtered = filtered_combined
+                                
+                        except Exception as e:
+                            st.warning(f"Couldn't process dates: {e}")
+                            viz_filtered = filtered_combined
+                    else:
+                        viz_filtered = filtered_combined
+                    
+                    # Visualization tabs - ALL using viz_filtered with proper formatting
+                    tab1, tab2, tab3, tab4 = st.tabs([
+                        "📅 Time Trends", 
+                        "🚢 Vessel Insights", 
+                        "🏢 SBU Insights", 
+                        "🌍 Origin Insights"
+                    ])
+
+                    with tab1:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if 'ETA' in viz_filtered.columns and 'sheet' in viz_filtered.columns:
+                                try:
+                                    eta_df = viz_filtered.dropna(subset=['ETA', 'sheet'])
+                                    if not eta_df.empty:
+                                        eta_df['ETA_Date'] = eta_df['ETA'].dt.date
+                                        eta_trend_df = eta_df.groupby(['sheet', 'ETA_Date']).size().reset_index(name='Bookings')
+                                        
+                                        fig_eta = px.line(
+                                            eta_trend_df,
+                                            x='ETA_Date',
+                                            y='Bookings',
+                                            color='sheet',
+                                            title='📆 Bookings Over Time by Sheet',
+                                            markers=True,
+                                            labels={'ETA_Date': 'ETA Date', 'Bookings': 'Number of Bookings'}
+                                        )
+                                        fig_eta.update_layout(
+                                            paper_bgcolor='rgba(0,0,0,0)',
+                                            plot_bgcolor='rgba(0,0,0,0)',
+                                            font=dict(color='white' if st.session_state.dark_mode else 'black'),
+                                            height=500
+                                        )
+                                        st.plotly_chart(fig_eta, use_container_width=True)
+                                    else:
+                                        st.warning("No data available after filtering")
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate ETA trend chart: {e}")
+                        
+                        with col2:
+                            if 'Delivery date' in viz_filtered.columns:
+                                try:
+                                    delivery_df = viz_filtered.copy()
+                                    
+                                    # Exclude 'globe_cleared' rows if the column exists
+                                    if 'globe_cleared' in delivery_df.columns:
+                                        delivery_df = delivery_df[~delivery_df['globe_cleared'].notna()]
+                                    
+                                    # Determine delivery status
+                                    delivery_df['Status'] = 'Pending'  # Default to pending
+                                    delivery_df.loc[delivery_df['Delivery date'].notna(), 'Status'] = 'Delivered'
+                                    
+                                    # Include 'globe_ongoing' in pending if the column exists
+                                    if 'globe_ongoing' in delivery_df.columns:
+                                        delivery_df.loc[delivery_df['globe_ongoing'].notna(), 'Status'] = 'Pending'
+                                    
+                                    # Count statuses
+                                    delivery_summary = delivery_df['Status'].value_counts().reset_index()
+                                    delivery_summary.columns = ['Status', 'Count']
+                                    
+                                    # Create the plot
+                                    fig_delivery = px.bar(
+                                        delivery_summary,
+                                        x='Status',
+                                        y='Count',
+                                        color='Status',
+                                        title='🚚 Delivery Status Breakdown',
+                                        text='Count',
+                                        category_orders={"Status": ["Delivered", "Pending"]}  # Ensures consistent order
+                                    )
+                                    
+                                    fig_delivery.update_layout(
+                                        height=500,
                                         paper_bgcolor='rgba(0,0,0,0)',
                                         plot_bgcolor='rgba(0,0,0,0)',
                                         font=dict(color='white' if st.session_state.dark_mode else 'black'),
-                                        height=500
+                                        xaxis_title="Delivery Status",
+                                        yaxis_title="Number of Orders"
                                     )
-                                    st.plotly_chart(fig_eta, use_container_width=True)
+                                    
+                                    # Update color mapping if needed
+                                    color_map = {'Delivered': 'green', 'Pending': 'orange'}
+                                    fig_delivery.for_each_trace(lambda t: t.update(marker_color=color_map[t.name]))
+                                    
+                                    st.plotly_chart(fig_delivery, use_container_width=True)
+                                    
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate delivery status chart: {e}")
+                    with tab2:
+                        # Vessel insights using viz_filtered with proper formatting
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if 'Origin Vessel' in viz_filtered.columns:
+                                try:
+                                    vessel_counts = viz_filtered['Origin Vessel'].value_counts().head(10).reset_index()
+                                    vessel_counts.columns = ['Vessel', 'Count']
+                                    fig_vessel = px.bar(
+                                        vessel_counts,
+                                        x='Vessel',
+                                        y='Count',
+                                        color='Vessel',
+                                        title='Top 10 Vessels by Shipment Count'
+                                    )
+                                    fig_vessel.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_vessel, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate vessel chart: {e}")
+                        
+                        with col2:
+                            if 'Origin Vessel' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
+                                try:
+                                    vessel_weight = viz_filtered.groupby('Origin Vessel')['Gross Weight'].sum().head(6).reset_index()
+                                    vessel_weight.columns = ['Vessel', 'Total Weight']
+                                    fig_weight = px.pie(
+                                        vessel_weight,
+                                        names='Vessel',
+                                        values='Total Weight',
+                                        title='Weight Distribution by Vessel (Top 6)'
+                                    )
+                                    fig_weight.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_weight, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate weight chart: {e}")
+
+                    with tab3:
+                        # SBU insights using viz_filtered with proper formatting
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if 'SBU' in viz_filtered.columns:
+                                try:
+                                    sbu_counts = viz_filtered['SBU'].value_counts().reset_index()
+                                    sbu_counts.columns = ['SBU', 'Count']
+                                    fig_sbu = px.bar(
+                                        sbu_counts,
+                                        x='SBU',
+                                        y='Count',
+                                        color='SBU',
+                                        title='Shipments by SBU'
+                                    )
+                                    fig_sbu.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_sbu, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate SBU chart: {e}")
+                        
+                        with col2:
+                            if 'SBU' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
+                                try:
+                                    sbu_weight = viz_filtered.groupby('SBU')['Gross Weight'].sum().reset_index()
+                                    sbu_weight.columns = ['SBU', 'Total Weight']
+                                    fig_sbu_weight = px.treemap(
+                                        sbu_weight,
+                                        path=['SBU'],
+                                        values='Total Weight',
+                                        title='Weight Distribution by SBU'
+                                    )
+                                    fig_sbu_weight.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_sbu_weight, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate SBU weight chart: {e}")
+
+                    with tab4:
+                        # Origin insights using viz_filtered with proper formatting
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if 'Origin' in viz_filtered.columns:
+                                try:
+                                    origin_counts = viz_filtered['Origin'].value_counts().head(10).reset_index()
+                                    origin_counts.columns = ['Origin', 'Count']
+                                    fig_origin = px.bar(
+                                        origin_counts,
+                                        x='Origin',
+                                        y='Count',
+                                        color='Origin',
+                                        title='Top 10 Origins by Shipment Count'
+                                    )
+                                    fig_origin.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_origin, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate origin chart: {e}")
+                        
+                        with col2:
+                            if 'Origin' in viz_filtered.columns and 'Shipper' in viz_filtered.columns:
+                                try:
+                                    origin_shipper = viz_filtered.groupby(['Origin', 'Shipper']).size().reset_index(name='Count')
+                                    fig_origin_shipper = px.sunburst(
+                                        origin_shipper,
+                                        path=['Origin', 'Shipper'],
+                                        values='Count',
+                                        title='Shipper Distribution by Origin'
+                                    )
+                                    fig_origin_shipper.update_layout(
+                                        height=500,
+                                        paper_bgcolor='rgba(0,0,0,0)',
+                                        plot_bgcolor='rgba(0,0,0,0)',
+                                        font=dict(color='white' if st.session_state.dark_mode else 'black')
+                                    )
+                                    st.plotly_chart(fig_origin_shipper, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Couldn't generate origin-shipper chart: {e}")
+
+
+            with consolidated_tab:
+                st.subheader("🌊✈️ Merchant Sending DSR View")
+                
+                # PDF Upload Section
+                uploaded_pdf = st.file_uploader(
+                    "Upload Operation Meeting Minutes PDF (Optional)", 
+                    type=['pdf'],
+                    key='dsr_pdf'
+                )
+                
+                if not combined.empty:
+                    # Show pre-processing insights
+                    st.markdown("### 🔍 Pre-Processing Insights")
+                    with st.expander("View raw data characteristics"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Data Shape**")
+                            st.code(f"Rows: {len(combined)}\nColumns: {len(combined.columns)}")
+                            
+                            st.write("**Missing Values**")
+                            missing_counts = combined.isna().sum().sort_values(ascending=False)
+                            st.dataframe(missing_counts.rename("Missing Count"), height=200)
+                        
+                        with col2:
+                            st.write("**Key Columns**")
+                            key_cols = ['HBL', 'Origin Vessel', 'Voyage No', 'LCL,FCL Status', 'Bond or Non Bond']
+                            present_cols = [c for c in key_cols if c in combined.columns]
+                            st.write(", ".join(present_cols) or "None available")
+                            
+                            if 'Origin Vessel' in combined.columns:
+                                vessel_variations = combined['Origin Vessel'].nunique()
+                                st.metric("Unique Vessel Names (Raw)", vessel_variations)
+
+                    # Process the data
+                    # After processing the data
+                    with st.spinner("Standardizing DSR merchant data..."):
+                        if uploaded_pdf:
+                            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                                tmp_file.write(uploaded_pdf.read())
+                                pdf_path = tmp_file.name
+                            processed_df = process_dsr_merchant_data(combined, pdf_path)
+                            
+                            # DEBUG: Show matching information
+                            with st.expander("Debug: Vessel Matching Details", expanded=False):
+                                if 'PDF_VESSEL_MATCH' in processed_df.columns:
+                                    matches = processed_df[['Vessel_Voyage_Standard', 'PDF_VESSEL_MATCH', 'MATCH_SCORE']].dropna()
+                                    st.write(f"Found {len(matches)} vessel matches")
+                                    st.dataframe(matches)
+                                    
+                                    # Show unmatched vessels
+                                    unmatched = processed_df[processed_df['PDF_VESSEL_MATCH'].isna()]
+                                    st.write(f"{len(unmatched)} vessels couldn't be matched")
+                                    if not unmatched.empty:
+                                        st.dataframe(unmatched['Vessel_Voyage_Standard'].value_counts().head(10))
                                 else:
-                                    st.warning("No data available after filtering")
-                            except Exception as e:
-                                st.warning(f"Couldn't generate ETA trend chart: {e}")
+                                    st.warning("No PDF_VESSEL_MATCH column created")
+                        else:
+                            processed_df = process_dsr_merchant_data_original(combined)
                     
-                    with col2:
-                        if 'Delivery date' in viz_filtered.columns:
-                            try:
-                                delivery_df = viz_filtered.copy()
-                                
-                                # Exclude 'globe_cleared' rows if the column exists
-                                if 'globe_cleared' in delivery_df.columns:
-                                    delivery_df = delivery_df[~delivery_df['globe_cleared'].notna()]
-                                
-                                # Determine delivery status
-                                delivery_df['Status'] = 'Pending'  # Default to pending
-                                delivery_df.loc[delivery_df['Delivery date'].notna(), 'Status'] = 'Delivered'
-                                
-                                # Include 'globe_ongoing' in pending if the column exists
-                                if 'globe_ongoing' in delivery_df.columns:
-                                    delivery_df.loc[delivery_df['globe_ongoing'].notna(), 'Status'] = 'Pending'
-                                
-                                # Count statuses
-                                delivery_summary = delivery_df['Status'].value_counts().reset_index()
-                                delivery_summary.columns = ['Status', 'Count']
-                                
-                                # Create the plot
-                                fig_delivery = px.bar(
-                                    delivery_summary,
-                                    x='Status',
-                                    y='Count',
-                                    color='Status',
-                                    title='🚚 Delivery Status Breakdown',
-                                    text='Count',
-                                    category_orders={"Status": ["Delivered", "Pending"]}  # Ensures consistent order
-                                )
-                                
-                                fig_delivery.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black'),
-                                    xaxis_title="Delivery Status",
-                                    yaxis_title="Number of Orders"
-                                )
-                                
-                                # Update color mapping if needed
-                                color_map = {'Delivered': 'green', 'Pending': 'orange'}
-                                fig_delivery.for_each_trace(lambda t: t.update(marker_color=color_map[t.name]))
-                                
-                                st.plotly_chart(fig_delivery, use_container_width=True)
-                                
-                            except Exception as e:
-                                st.warning(f"Couldn't generate delivery status chart: {e}")
-                with tab2:
-                    # Vessel insights using viz_filtered with proper formatting
-                    col1, col2 = st.columns(2)
+                    # Show post-processing insights
+                    st.markdown("---")
+                    st.markdown("### ✅ Processing Results")
                     
+                    col1, col2, col3 = st.columns(3)
                     with col1:
-                        if 'Origin Vessel' in viz_filtered.columns:
-                            try:
-                                vessel_counts = viz_filtered['Origin Vessel'].value_counts().head(10).reset_index()
-                                vessel_counts.columns = ['Vessel', 'Count']
-                                fig_vessel = px.bar(
-                                    vessel_counts,
-                                    x='Vessel',
-                                    y='Count',
-                                    color='Vessel',
-                                    title='Top 10 Vessels by Shipment Count'
-                                )
-                                fig_vessel.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_vessel, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate vessel chart: {e}")
+                        if 'Vessel_Voyage_Standard' in processed_df.columns:
+                            orig_vessels = combined['Origin Vessel'].nunique() if 'Origin Vessel' in combined.columns else 0
+                            std_vessels = processed_df['Vessel_Voyage_Standard'].nunique()
+                            st.metric("Vessel Names Standardized", 
+                                    f"{std_vessels} unique",
+                                    delta=f"Reduced from {orig_vessels}")
                     
                     with col2:
-                        if 'Origin Vessel' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
-                            try:
-                                vessel_weight = viz_filtered.groupby('Origin Vessel')['Gross Weight'].sum().head(6).reset_index()
-                                vessel_weight.columns = ['Vessel', 'Total Weight']
-                                fig_weight = px.pie(
-                                    vessel_weight,
-                                    names='Vessel',
-                                    values='Total Weight',
-                                    title='Weight Distribution by Vessel (Top 6)'
-                                )
-                                fig_weight.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_weight, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate weight chart: {e}")
+                        if 'Bond or Non Bond' in processed_df.columns:
+                            bond_pct = processed_df['Bond or Non Bond'].value_counts(normalize=True).get('BOND', 0)
+                            st.metric("Bond Shipments", f"{bond_pct:.1%}")
+                    
+                    with col3:
+                        if 'LCL,FCL Status' in processed_df.columns:
+                            valid_status = processed_df['LCL,FCL Status'].notna().sum()
+                            st.metric("Valid Status Values", f"{valid_status}/{len(processed_df)}")
 
-                with tab3:
-                    # SBU insights using viz_filtered with proper formatting
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if 'SBU' in viz_filtered.columns:
-                            try:
-                                sbu_counts = viz_filtered['SBU'].value_counts().reset_index()
-                                sbu_counts.columns = ['SBU', 'Count']
-                                fig_sbu = px.bar(
-                                    sbu_counts,
-                                    x='SBU',
-                                    y='Count',
-                                    color='SBU',
-                                    title='Shipments by SBU'
-                                )
-                                fig_sbu.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_sbu, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate SBU chart: {e}")
-                    
-                    with col2:
-                        if 'SBU' in viz_filtered.columns and 'Gross Weight' in viz_filtered.columns:
-                            try:
-                                sbu_weight = viz_filtered.groupby('SBU')['Gross Weight'].sum().reset_index()
-                                sbu_weight.columns = ['SBU', 'Total Weight']
-                                fig_sbu_weight = px.treemap(
-                                    sbu_weight,
-                                    path=['SBU'],
-                                    values='Total Weight',
-                                    title='Weight Distribution by SBU'
-                                )
-                                fig_sbu_weight.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_sbu_weight, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate SBU weight chart: {e}")
+                    # PDF-specific metrics if uploaded
+                    if uploaded_pdf:
+                        st.markdown("---")
+                        st.markdown("### 📄 PDF Integration Results")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if 'PDF_VESSEL_MATCH' in processed_df.columns:
+                                matched = processed_df['PDF_VESSEL_MATCH'].notna().sum()
+                                st.metric("Vessels Matched with PDF", 
+                                        f"{matched}/{len(processed_df)}",
+                                        help="Number of vessels successfully matched with operation meeting minutes")
+                        
+                        with col2:
+                            if 'FORECAST ETA' in processed_df.columns:
+                                updated_etas = processed_df['FORECAST ETA'].notna().sum()
+                                st.metric("Updated ETAs from PDF", 
+                                        f"{updated_etas}",
+                                        help="ETAs updated from meeting minutes forecast")
+                        
 
-                with tab4:
-                    # Origin insights using viz_filtered with proper formatting
-                    col1, col2 = st.columns(2)
+
+                        # Manual Timeline Adjustment section
+                        if 'PDF_VESSEL_MATCH' in processed_df.columns:
+                            st.markdown("---")
+                            st.markdown("### ✏️ Manual Timeline Adjustment")
+                            
+                            # Get unique matched vessels with all needed columns
+                            matched_vessels = processed_df[
+                                processed_df['PDF_VESSEL_MATCH'].notna()
+                            ]['Vessel_Voyage_Standard'].unique()
+                            
+                            if len(matched_vessels) > 0:
+                                # Include ALL needed columns including PDF data
+                                # Define target column names we expect
+                                expected_columns = [
+                                    'Vessel_Voyage_Standard', 'ETA', 'ATA', 'ETB', 'Estimated Clearance',
+                                    'PDF_VESSEL_MATCH', 'BOOKING ETA', 'FORECAST ETA', 'CURRENT_STATUS'
+                                ]
+
+                                # Build a mapping from expected name to actual column (based on similarity)
+                                column_mapping = {}
+                                actual_columns = list(processed_df.columns)
+
+                                for expected in expected_columns:
+                                    # Get the closest match with a cutoff for similarity
+                                    matches = difflib.get_close_matches(expected, actual_columns, n=1, cutoff=0.7)
+                                    if matches:
+                                        column_mapping[expected] = matches[0]
+
+                                # DEBUG: Show mapping results
+                                st.markdown("#### 🧪 Column Mapping (Fuzzy Matched)")
+                                st.json(column_mapping)
+
+                                # Use only columns that were matched
+                                present_editable_cols = list(column_mapping.values())
+
+                                # DEBUG: Warn if anything couldn't be matched
+                                unmatched = [col for col in expected_columns if col not in column_mapping]
+                                if unmatched:
+                                    st.warning(f"⚠️ Could not find close matches for: {', '.join(unmatched)}")
+                                else:
+                                    st.success("✅ All expected columns were matched using fuzzy logic")
+
+                                # Filter vessel rows using fuzzy-mapped column names
+                                vessel_df = processed_df.loc[
+                                    processed_df['Vessel_Voyage_Standard'].isin(processed_df[column_mapping['Vessel_Voyage_Standard']]),
+                                    present_editable_cols
+                                ].copy()
+
+
+                                
+                                # Convert dates to strings for editing
+                                for col in ['ETA', 'ATA', 'ETB', 'Estimated Clearance', 'BOOKING ETA', 'FORECAST ETA']:
+                                    if col in vessel_df.columns:
+                                        vessel_df[col] = vessel_df[col].apply(
+                                            lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) and pd.api.types.is_datetime64_any_dtype(x) else x
+                                        )
+                                
+                                with st.form("eta_update_form"):
+                                    st.write("**Edit vessel timelines (YYYY-MM-DD format):**")
+                                    
+                                    # Create editor with ALL columns
+                                    edited_df = st.data_editor(
+                                        vessel_df.sort_values('Vessel_Voyage_Standard'),
+                                        column_config={
+                                            "ETA": st.column_config.DateColumn(
+                                                "ETA (Editable)",
+                                                format="YYYY-MM-DD",
+                                                help="Estimated Time of Arrival",
+                                            ),
+                                            "ATA": st.column_config.DateColumn(
+                                                "ATA (Auto-updated)",
+                                                format="YYYY-MM-DD",
+                                                disabled=True,
+                                            ),
+                                            "ETB": st.column_config.DateColumn(
+                                                "ETB (Auto-updated)",
+                                                format="YYYY-MM-DD",
+                                                disabled=True,
+                                            ),
+                                            "Estimated Clearance": st.column_config.DateColumn(
+                                                "Est. Clearance (Auto-updated)",
+                                                format="YYYY-MM-DD",
+                                                disabled=True,
+                                            ),
+                                            "PDF_VESSEL_MATCH": st.column_config.TextColumn(
+                                                "Matched PDF Vessel",
+                                                disabled=True,
+                                            ),
+                                            "BOOKING ETA": st.column_config.DateColumn(
+                                                "Original Booking ETA",
+                                                format="YYYY-MM-DD",
+                                                disabled=True,
+                                            ),
+                                            "FORECAST ETA": st.column_config.DateColumn(
+                                                "PDF Forecast ETA",
+                                                format="YYYY-MM-DD",
+                                                disabled=True,
+                                            ),
+                                            "CURRENT_STATUS": st.column_config.TextColumn(
+                                                "PDF Status",
+                                                disabled=True,
+                                            )
+                                        },
+                                        num_rows="fixed",
+                                        use_container_width=True,
+                                        key="vessel_editor"
+                                    )
+                                    
+                                    # Handle real-time updates
+                                    if 'vessel_editor' in st.session_state:
+                                        changes = st.session_state.vessel_editor['edited_rows']
+                                        if changes:
+                                            for idx, change in changes.items():
+                                                if 'ETA' in change:
+                                                    try:
+                                                        new_eta = pd.to_datetime(change['ETA'])
+                                                        # Update dependent dates directly in the dataframe
+                                                        edited_df.loc[int(idx), 'ATA'] = (new_eta + timedelta(days=1)).strftime('%Y-%m-%d')
+                                                        edited_df.loc[int(idx), 'ETB'] = (new_eta + timedelta(days=2)).strftime('%Y-%m-%d')
+                                                        edited_df.loc[int(idx), 'Estimated Clearance'] = (new_eta + timedelta(days=3)).strftime('%Y-%m-%d')
+                                                    except Exception as e:
+                                                        st.error(f"Invalid date format: {e}")
+                                    
+                                    submitted = st.form_submit_button("💾 Save All Updates")
+                                    
+                                    if submitted:
+                                        # Convert back to datetime and update main dataframe
+                                        for col in ['ETA', 'ATA', 'ETB', 'Estimated Clearance']:
+                                            if col in edited_df.columns:
+                                                edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce')
+                                        
+                                        # Update the main dataframe
+                                        for _, row in edited_df.iterrows():
+                                            mask = (
+                                                (processed_df['Vessel_Voyage_Standard'] == row['Vessel_Voyage_Standard']) & 
+                                                (processed_df['PDF_VESSEL_MATCH'].notna())
+                                            )
+                                            processed_df.loc[mask, 'ETA'] = row['ETA']
+                                            processed_df.loc[mask, 'ATA'] = row['ETA'] + timedelta(days=1) if pd.notna(row['ETA']) else pd.NaT
+                                            processed_df.loc[mask, 'ETB'] = row['ETA'] + timedelta(days=2) if pd.notna(row['ETA']) else pd.NaT
+                                            processed_df.loc[mask, 'Estimated Clearance'] = row['ETA'] + timedelta(days=3) if pd.notna(row['ETA']) else pd.NaT
+                                        
+                                        st.success("Vessel timelines updated successfully!")
+                                        st.rerun()
+                            else:
+                                st.info("No matched vessels found for timeline adjustment")
+
+
+                    # Processing details
+                    with st.expander("🔧 Processing Details"):
+                        st.markdown("""
+                        **Applied Transformations:**
+                        - **Vessel Standardization**: Combined vessel+voyage, cleaned special chars, fuzzy-matched similar names
+                        - **Bond Classification**: Auto-classified based on origin port and carrier
+                        - **Status Cleaning**: Normalized LCL/FCL status values
+                        - **Timeline Calculation**: Estimated ATA and clearance dates
+                        """)
+                        
+                        if uploaded_pdf:
+                            st.markdown("""
+                            **PDF Enhancements:**
+                            - Vessel schedule matching with operation meeting minutes
+                            - ETA updates from official forecasts
+                            - Status cross-validation
+                            """)
+                        
+                        if 'Vessel_Voyage_Standard' in processed_df.columns:
+                            st.write("**Example Vessel Standardizations:**")
+                            sample_cols = ['Origin Vessel', 'Vessel_Voyage_Standard']
+                            if 'PDF_VESSEL_MATCH' in processed_df.columns:
+                                sample_cols.append('PDF_VESSEL_MATCH')
+                            sample_vessels = processed_df[sample_cols].dropna().drop_duplicates().head(5)
+                            st.dataframe(sample_vessels, hide_index=True)
+
+                    # Show processed data
+                    st.markdown("---")
+                    st.markdown("### 📦 Processed Data Preview")
+                    st.dataframe(processed_df.head(10), use_container_width=True)
                     
-                    with col1:
-                        if 'Origin' in viz_filtered.columns:
-                            try:
-                                origin_counts = viz_filtered['Origin'].value_counts().head(10).reset_index()
-                                origin_counts.columns = ['Origin', 'Count']
-                                fig_origin = px.bar(
-                                    origin_counts,
-                                    x='Origin',
-                                    y='Count',
-                                    color='Origin',
-                                    title='Top 10 Origins by Shipment Count'
-                                )
-                                fig_origin.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_origin, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate origin chart: {e}")
-                    
-                    with col2:
-                        if 'Origin' in viz_filtered.columns and 'Shipper' in viz_filtered.columns:
-                            try:
-                                origin_shipper = viz_filtered.groupby(['Origin', 'Shipper']).size().reset_index(name='Count')
-                                fig_origin_shipper = px.sunburst(
-                                    origin_shipper,
-                                    path=['Origin', 'Shipper'],
-                                    values='Count',
-                                    title='Shipper Distribution by Origin'
-                                )
-                                fig_origin_shipper.update_layout(
-                                    height=500,
-                                    paper_bgcolor='rgba(0,0,0,0)',
-                                    plot_bgcolor='rgba(0,0,0,0)',
-                                    font=dict(color='white' if st.session_state.dark_mode else 'black')
-                                )
-                                st.plotly_chart(fig_origin_shipper, use_container_width=True)
-                            except Exception as e:
-                                st.warning(f"Couldn't generate origin-shipper chart: {e}")
+                    # Download option
+                    csv = processed_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download Processed Data",
+                        data=csv,
+                        file_name="dsr_merchant_data_processed.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.warning("No data available for processing. Please load data in the analysis tab first.")
+
+
 
 
 def show_summary_statistics(df, title):
@@ -2102,28 +2658,209 @@ def show_summary_statistics(df, title):
             st.bar_chart(df[col].value_counts())
 
 
-
-def main():
-    st.set_page_config(
-        page_title="DSR Processor",
-        page_icon="📊",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Initialize dark mode state
-    if 'dark_mode' not in st.session_state:
-        st.session_state.dark_mode = False
-    
-    # Add dark mode toggle to sidebar (will appear above other sidebar elements)
+def show_sidebar():
     with st.sidebar:
-        dark_mode = st.toggle("🌙 Dark Mode", value=st.session_state.dark_mode)
-        if dark_mode != st.session_state.dark_mode:
-            st.session_state.dark_mode = dark_mode
-            st.rerun()
-    
-    # Apply appropriate CSS based on mode
-    if st.session_state.dark_mode:
+        #st.image("https://via.placeholder.com/150x50?text=DSR+Processor", width=150)  # Add your logo here
+        
+        # Configuration Section
+        config_expander = st.expander("⚙️ CONFIGURATION", expanded=False)
+        with config_expander:
+            if st.button("🛠️ Open Settings Panel"):
+                st.session_state.show_config = not st.session_state.get('show_config', False)
+            
+            if st.session_state.get('show_config', False):
+                show_configuration_ui()
+        
+        st.markdown("---")
+        st.subheader("🛠️ Processing Parameters")
+        
+        # Add date filtering toggle
+        st.session_state.use_date_filter = st.checkbox(
+            "Enable Date Filtering",
+            value=False,
+            help="Filter records by date range when enabled"
+        )
+        
+        # Only show date selection if filtering is enabled
+        if st.session_state.use_date_filter:
+            weeks = config_manager.config["global"]["date_range_weeks"]
+            selected_date = st.date_input(
+                "📅 Reference Date for Shipments",
+                value=st.session_state.selected_reference_date,
+                help=f"Will show shipments within ±{weeks} weeks of this date"
+            )
+            st.session_state.selected_reference_date = pd.Timestamp(selected_date)
+        
+        # Fuzzy Threshold with visual indicator
+        threshold = config_manager.config["global"]["fuzzy_threshold"]
+        st.progress(threshold/100, text=f"🔍 Fuzzy Matching Threshold: {threshold}%")
+        
+        st.markdown("---")
+        st.subheader("📋 Processing Pipeline")
+        
+        # Enhanced progress tracker
+        steps = [
+            (1, "1. Expo Data", st.session_state.expo_processed),
+            (2, "2. Maersk Data", st.session_state.maersk_processed),
+            (3, "3. Globe Data", st.session_state.globe_processed),
+            (4, "4. Scanwell Data", st.session_state.scanwell_processed),
+            (5, "5. Final Results", all([
+                st.session_state.expo_processed,
+                st.session_state.maersk_processed,
+                st.session_state.globe_processed,
+                st.session_state.scanwell_processed
+            ]))
+        ]
+        
+        for step_num, step_name, is_complete in steps:
+            if st.session_state.current_step == step_num:
+                st.markdown(f"➡️ **{step_name}** (Current Step)")
+            elif is_complete:
+                st.markdown(f"✅ ~~{step_name}~~ (Completed)")
+            else:
+                st.markdown(f"◻️ {step_name}")
+        
+        # Navigation controls with better icons
+        if st.session_state.current_step > 1 and st.session_state.current_step < 5:
+            if st.button("⏮️ Previous Step"):
+                st.session_state.current_step -= 1
+                st.rerun()
+        
+        # Final step actions
+        if st.session_state.current_step == 5:
+            st.markdown("---")
+            st.subheader("📤 Export Results")
+            combined = pd.concat([
+                st.session_state.expo_data,
+                st.session_state.maersk_data,
+                st.session_state.globe_data,
+                st.session_state.scanwell_data
+            ], ignore_index=True)
+            
+            csv = combined.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="💾 Download Complete Dataset",
+                data=csv,
+                file_name='dsr_combined_results.csv',
+                mime='text/csv',
+                help="Download all processed data as a single CSV file"
+            )
+            
+            if st.button("🔄 Start New Processing Run", type="primary"):
+                init_session_state()
+                st.rerun()
+
+
+
+def show_admin_panel():
+    st.title("🔐 User Management Panel")
+    st.markdown("Manage users, roles, and access levels.")
+
+    # --- User List Table ---
+    users = auth.list_users()
+    df = pd.DataFrame(users)
+    st.markdown("### 👥 Current Users")
+    st.dataframe(df, use_container_width=True, height=300)
+
+    st.markdown("---")
+
+    # --- Add User Section ---
+    with st.expander("➕ Add New User"):
+        st.subheader("Create a New Account")
+        with st.form("add_user_form"):
+            new_user = st.text_input("Username", placeholder="e.g. johndoe")
+            new_pass = st.text_input("Password", type="password")
+            new_role = st.selectbox("Role", ["full", "limited", "view_only"])
+            submitted = st.form_submit_button("Create User")
+            
+            if submitted:
+                if not new_user or not new_pass:
+                    st.warning("Username and password are required.")
+                elif auth.add_user(new_user.strip(), new_pass, new_role):
+                    st.success(f"✅ User '{new_user}' created.")
+                    st.rerun()
+                else:
+                    st.error("❌ Username already exists.")
+
+    st.markdown("---")
+
+    # --- User Actions Section ---
+    st.subheader("⚙️ Manage Existing Users")
+    selected_user = st.selectbox("Select User", [u["username"] for u in users])
+
+    # Fetch current user info
+    current_info = next(u for u in users if u["username"] == selected_user)
+    is_self = selected_user == st.session_state.current_user
+
+    col1, col2 = st.columns(2)
+
+    # --- Change Role ---
+    with col1:
+        st.markdown("**Change Role**")
+        new_role = st.selectbox(
+            f"New role for {selected_user}", 
+            ["full", "limited", "view_only"], 
+            index=["full", "limited", "view_only"].index(current_info["role"]),
+            key=f"role_{selected_user}"
+        )
+        if st.button("Update Role"):
+            if auth.update_user_role(selected_user, new_role):
+                st.success("Role updated.")
+                st.rerun()
+            else:
+                st.error("Failed to update role.")
+
+    # --- Toggle Active Status ---
+    with col2:
+        st.markdown("**User Access**")
+        current_status = current_info["is_active"]
+        toggle_label = "Disable" if current_status else "Enable"
+
+        if is_self:
+            st.info("⚠️ You cannot disable your own account.")
+        else:
+            if st.button(f"{toggle_label} User"):
+                if auth.toggle_user_active(selected_user):
+                    st.success(f"{selected_user} has been {'disabled' if current_status else 'enabled'}.")
+                    st.rerun()
+                else:
+                    st.error("Failed to toggle status.")
+
+    # --- Reset Password (Optional) ---
+    with st.expander("🔁 Reset User Password"):
+        st.markdown("Reset the password for a user.")
+        reset_user = st.selectbox("Select User", [u["username"] for u in users], key="reset_pw_user")
+        new_pw = st.text_input("New Password", type="password", key="new_pw_input")
+        if st.button("Reset Password"):
+            if auth.update_user_password(reset_user, new_pw):
+                st.success(f"Password for '{reset_user}' updated.")
+            else:
+                st.error("Failed to reset password.")
+
+    # --- Delete User (Admin Only) ---
+    st.markdown("### 🗑️ Delete User")
+
+    if is_self:
+        st.info("You cannot delete your own account.")
+    else:
+        with st.expander(f"🗑️ Delete '{selected_user}'"):
+            st.warning("This action is irreversible.")
+            confirm = st.checkbox("Yes, I want to delete this user.")
+            if st.button("Delete User"):
+                if confirm:
+                    if auth.delete_user(selected_user):
+                        st.success(f"User '{selected_user}' has been deleted.")
+                        st.rerun()
+                    else:
+                        st.error("Failed to delete user.")
+                else:
+                    st.error("Please confirm before deleting.")
+
+
+
+def apply_dark_mode(dark_mode_enabled):
+    """Apply dark mode CSS styles if enabled"""
+    if dark_mode_enabled:
         dark_css = """
         <style>
             /* Dark mode styles */
@@ -2145,7 +2882,6 @@ def main():
                 background: rgba(30, 30, 30, 0.8) !important;
                 border-color: #444 !important;
             }
-            /* Your existing button styles - modified for dark mode */
             .stButton>button {
                 transition: all 0.3s ease;
                 background-color: #4F8BF9;
@@ -2162,7 +2898,6 @@ def main():
         """
         st.markdown(dark_css, unsafe_allow_html=True)
     else:
-        # Light mode CSS (your original styles)
         st.markdown("""
         <style>
             .stButton>button {
@@ -2180,20 +2915,1129 @@ def main():
             }
         </style>
         """, unsafe_allow_html=True)
+
+
+def main():
+    print("1. Starting main() execution")  # Debug point 1
     
+    # Page configuration
+    st.set_page_config(
+        page_title="DSR Processor",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    print("2. Page config set")  # Debug point 2
+
+    # Initialize dark mode state
+    if 'dark_mode' not in st.session_state:
+        st.session_state.dark_mode = False
+        print("3. Initialized dark_mode in session_state")  # Debug point 3
+    
+    # Apply appropriate CSS based on mode
+    print(f"4. Applying dark mode (current state: {st.session_state.dark_mode})")  # Debug point 4
+    apply_dark_mode(st.session_state.dark_mode)
+
+    # Authentication flow
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+        print("5. Initialized authenticated in session_state")  # Debug point 5
+    
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = None
+        print("6. Initialized current_user in session_state")  # Debug point 6
+    
+    if 'access_level' not in st.session_state:
+        st.session_state.access_level = None
+        print("7. Initialized access_level in session_state")  # Debug point 7
+    
+    # Show login page if not authenticated
+    if not st.session_state.authenticated:
+        print("8. User not authenticated, showing login page")  # Debug point 8
+        show_login_page()
+        return
+    
+    # For authenticated users
+    print("9. User is authenticated, routing to appropriate app")  # Debug point 9
+    if st.session_state.authenticated:
+        print(f"10. User access level: {st.session_state.access_level}")  # Debug point 10
+        if st.session_state.access_level == "full":  # Admin
+            print("11. Routing to admin app")  # Debug point 11
+            run_admin_app()
+        elif st.session_state.access_level == "limited":  # Legato
+            print("12. Routing to legato app")  # Debug point 12
+            run_legato_app()
+        elif st.session_state.access_level == "view_only":  # Business
+            print("13. Routing to business app")  # Debug point 13
+            run_business_app()
+
+    # Configuration manager setup
     if 'config_manager' not in st.session_state:
+        print("14. Initializing config_manager")  # Debug point 14
         st.session_state.config_manager = ConfigurationManager()
     
-    show_sidebar()
-    show_current_step()
+    # Show sidebar and current step
+    print("15. Showing sidebar")  # Debug point 15
+    #show_sidebar()
+    print("16. Showing current step")  # Debug point 16
+    #show_current_step()
     
+    # Configuration validation
     if st.session_state.get('show_config', False):
+        print("17. Validating configuration")  # Debug point 17
         errors = st.session_state.config_manager.validate_config()
         if errors:
+            print(f"18. Found {len(errors)} config errors")  # Debug point 18
             st.toast("⚠️ Configuration errors detected!", icon="⚠️")
             with st.expander("Configuration Issues", expanded=True):
                 for error in errors:
                     st.error(error)
+    
+    print("19. Main() execution complete")  # Debug point 19
+
+
+
+def admin_required(func):
+    def wrapper(*args, **kwargs):
+        if st.session_state.get('access_level') != "full":
+            st.warning("Admin access required")
+            return
+        return func(*args, **kwargs)
+    return wrapper
+
+def show_login_page():
+    """Displays the login page without calling set_page_config()"""
+    # Custom CSS for styling
+    st.markdown("""
+    <style>
+        .login-container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }
+        .login-title {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 2rem;
+        }
+        .login-form {
+            padding: 2rem;
+            background: white;
+            border-radius: 8px;
+        }
+        .stButton>button {
+            width: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+        .stTextInput>div>div>input {
+            padding: 0.5rem;
+            border-radius: 4px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Login container
+    with st.container():
+        st.markdown('<div class="login-container">', unsafe_allow_html=True)
+        
+        # Title with logo
+        st.markdown("""
+        <div class="login-title">
+            <h1>📊 Piyadasa-DSR Data Processor</h1>
+            <p>Streamlined shipment data analysis platform</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Login form
+        with st.form("login_form"):
+            st.markdown('<div class="login-form">', unsafe_allow_html=True)
+            
+            username = st.text_input("👤 Username", placeholder="Enter your username")
+            password = st.text_input("🔒 Password", type="password", placeholder="Enter your password")
+            
+            login_button = st.form_submit_button("Login")
+            
+            if login_button:
+                if not username or not password:
+                    st.error("Please enter both username and password")
+                else:
+                    with st.spinner("Authenticating..."):
+                        result = auth.authenticate(username, password)
+                        if result["authenticated"]:
+                            st.session_state.authenticated = True
+                            st.session_state.current_user = username
+                            st.session_state.access_level = result["access_level"]
+                            st.success("Login successful!")
+                            time.sleep(1)  # Let the user see the success message
+                            st.rerun()
+                        else:
+                            st.error("Invalid credentials. Please try again.")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Footer
+        st.markdown("""
+        <div style="text-align: center; margin-top: 2rem; color: #7f8c8d;">
+            <p>Need help? Contact IT support</p>
+            <p>v2.0.0</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def clean_air_data(df):
+    df_clean = df.copy()
+    
+    # Step 1: Remove blank HAWB rows
+    hawb_col = df_clean.columns[8]
+    df_clean = df_clean[~df_clean[hawb_col].isna()]
+    df_clean = df_clean[df_clean[hawb_col].astype(str).str.strip() != '']
+
+    # Step 2: Fix known misalignment based on markers
+    start_marker = "MF2415972"
+    end_marker = "H24504871-P8;"
+    start_idx = df_clean[df_clean.iloc[:, 0].astype(str).str.strip() == start_marker].index.min()
+    end_idx = df_clean[df_clean.iloc[:, 0].astype(str).str.strip() == end_marker].index.max()
+
+    if pd.notna(start_idx) and pd.notna(end_idx):
+        block_df = df_clean.loc[start_idx:end_idx].copy()
+        exclude_values = {start_marker, end_marker}
+        misaligned_mask = ~block_df.iloc[:, 0].astype(str).str.strip().isin(exclude_values)
+        misaligned_indices = block_df[misaligned_mask].index
+
+        cols = df_clean.columns.tolist()
+        df_clean.loc[misaligned_indices, cols[:-1]] = df_clean.loc[misaligned_indices, cols[1:]].values
+        df_clean.loc[misaligned_indices, cols[-1]] = pd.NA
+
+    # Step 3: Drop duplicates
+    df_clean = df_clean.drop_duplicates()
+
+    # Step 4: Date cleaning
+    def clean_and_parse_date(date_str):
+        if pd.isna(date_str) or not isinstance(date_str, str):
+            return pd.NaT
+        date_str = re.sub(r"[^\d./]", "", date_str.strip())
+
+        if re.fullmatch(r"\d{1,4}", date_str):
+            return pd.NaT
+
+        match_short_year = re.match(r"(\d{1,2})[./](\d{1,2})[./](\d{2})$", date_str)
+        if match_short_year:
+            dd, mm, yy = match_short_year.groups()
+            date_str = f"{dd}.{mm}.20{yy}"
+
+        parts = re.split(r"[./]", date_str)
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            a, b, c = map(int, parts)
+            if c < 100:
+                c += 2000
+            if b > 12:
+                dd, mm, yyyy = b, a, c
+            else:
+                dd, mm, yyyy = a, b, c
+            try:
+                return datetime(yyyy, mm, dd)
+            except:
+                return pd.NaT
+
+        for fmt in ("%d.%m.%Y", "%d/%m/%Y"):
+            try:
+                return pd.to_datetime(date_str, format=fmt, errors="coerce")
+            except:
+                continue
+
+        return pd.NaT
+
+    eta_col = df_clean.columns[10]
+    clearance_col = df_clean.columns[11]
+    df_clean['ETA_PARSED'] = df_clean[eta_col].apply(clean_and_parse_date)
+    df_clean['CLEARANCE_PARSED'] = df_clean[clearance_col].apply(clean_and_parse_date)
+
+    return df_clean
+
+def run_admin_app():
+    # Initialize dark mode state
+    if 'dark_mode' not in st.session_state:
+        st.session_state.dark_mode = False
+    
+    # Sidebar - Keep essential processing controls
+    with st.sidebar:
+        # Dark mode toggle
+        dark_mode = st.toggle("🌙 Dark Mode", 
+                            value=st.session_state.dark_mode,
+                            key="admin_dark_mode_toggle")
+        if dark_mode != st.session_state.dark_mode:
+            st.session_state.dark_mode = dark_mode
+            st.rerun()
+        
+        # Logout button
+        if st.button("🚪 Logout", key="admin_logout_btn"):
+            st.session_state.authenticated = False
+            st.session_state.current_user = None
+            st.session_state.access_level = None
+            st.rerun()
+
+        # Processing Parameters (keep this in sidebar)
+        st.markdown("---")
+        st.subheader("🛠️ Processing Parameters")
+        
+        # Date filtering toggle
+        st.session_state.use_date_filter = st.checkbox(
+            "Enable Date Filtering",
+            value=st.session_state.get('use_date_filter', False),
+            help="Filter records by date range when enabled"
+        )
+        
+        if st.session_state.use_date_filter:
+            weeks = config_manager.config["global"]["date_range_weeks"]
+            selected_date = st.date_input(
+                "📅 Reference Date",
+                value=st.session_state.get('selected_reference_date', datetime.now().date()),
+                help=f"±{weeks} weeks range"
+            )
+            st.session_state.selected_reference_date = pd.Timestamp(selected_date)
+        
+        # Processing Pipeline Status
+        st.markdown("---")
+        st.subheader("📋 Pipeline Status")
+        steps = [
+            (1, "1. Expo Data", st.session_state.get('expo_processed', False)),
+            (2, "2. Maersk Data", st.session_state.get('maersk_processed', False)),
+            (3, "3. Globe Data", st.session_state.get('globe_processed', False)),
+            (4, "4. Scanwell Data", st.session_state.get('scanwell_processed', False))
+        ]
+        
+        for step_num, step_name, is_complete in steps:
+            if st.session_state.get('current_step', 1) == step_num:
+                st.markdown(f"➡️ **{step_name}**")
+            elif is_complete:
+                st.markdown(f"✅ ~~{step_name}~~")
+            else:
+                st.markdown(f"◻️ {step_name}")
+        
+        # Final step download and reset
+        if st.session_state.get('current_step', 1) == 5:
+            st.markdown("---")
+            combined = pd.concat([
+                st.session_state.expo_data,
+                st.session_state.maersk_data,
+                st.session_state.globe_data,
+                st.session_state.scanwell_data
+            ], ignore_index=True)
+            
+            csv = combined.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="💾 Download Results",
+                data=csv,
+                file_name='dsr_combined_results.csv',
+                mime='text/csv'
+            )
+            
+            if st.button("🔄 Reset Pipeline", type="primary"):
+                init_session_state()
+                st.rerun()
+
+    # Main Content Area with new Configuration tab
+    sea_tab, air_tab, config_tab = st.tabs(["🌊 Sea Shipments", "✈️ Air Shipments", "⚙️ Configuration"])
+    
+    with sea_tab:
+        # Your existing sea shipment processing code
+        show_current_step()
+
+    with air_tab:
+        st.header("✈️ Air Shipment Management")
+
+        # Ensure air_data is initialized
+        if 'air_data' not in st.session_state:
+            st.session_state.air_data = pd.DataFrame()
+
+        # Column layout for controls
+        col1, col2 = st.columns(2)
+
+        with col1:
+            air_source = st.radio(
+                "Data Source",
+                options=["Google Sheets", "Upload File"],
+                key="air_source_radio"
+            )
+
+        with col2:
+            if air_source == "Google Sheets":
+                if st.button("🔄 Fetch Air Data", key="fetch_air_data"):
+                    try:
+                        response = requests.get(
+                            "https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx",
+                            verify=False
+                        )
+                        st.session_state.air_data = pd.read_excel(BytesIO(response.content), sheet_name="AIR")
+                        st.success("Air data loaded successfully!")
+                    except Exception as e:
+                        st.error(f"Failed to fetch air data: {str(e)}")
+            else:
+                air_file = st.file_uploader(
+                    "Upload Air Shipment File", 
+                    type=['xlsx', 'csv'],
+                    key="air_file_uploader"
+                )
+                if air_file:
+                    if air_file.name.endswith('.xlsx'):
+                        try:
+                            st.session_state.air_data = pd.read_excel(air_file, sheet_name="Previous")
+                            st.success("Air data uploaded from 'Previous' sheet successfully!")
+                        except ValueError:
+                            st.error("Sheet named 'Previous' not found in the uploaded Excel file.")
+                    else:
+                        st.session_state.air_data = pd.read_csv(air_file)
+                        st.success("Air data CSV uploaded successfully!")
+
+        # Separate display section
+        if not st.session_state.air_data.empty:
+            st.markdown("---")
+            st.subheader("📦 Loaded Air Shipment Data")
+            st.dataframe(st.session_state.air_data, use_container_width=True)
+
+
+
+
+        with config_tab:
+            st.header("⚙️ System Configuration")
+            
+            # Use your existing configuration UI function but remove sidebar references
+            def show_config_tab_ui():
+                with st.expander("⚙️ Settings", expanded=True):  # Changed from sidebar.expander
+                    tab1, tab2, tab3 = st.tabs(["Columns", "Mappings", "Global"])
+                    
+                    with tab1:
+                        show_column_management()
+                        
+                    with tab2:
+                        show_mapping_management()
+                        
+                    with tab3:
+                        show_global_settings()
+            
+            # User management section
+            show_admin_panel()
+            
+            # Configuration section
+            st.markdown("---")
+            st.subheader("🛠️ System Settings")
+            show_config_tab_ui()  # Using the modified version of your config UI
+            
+
+
+def run_legato_app():
+    st.title("📊 Legato Team - Consolidated Shipment Overview")
+    
+    # Initialize sidebar as closed by default
+    st.markdown("""
+    <style>
+        [data-testid="collapsedControl"] {
+            display: none
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Add logout button to sidebar
+    with st.sidebar:
+        if st.button("🚪 Logout", key="legato_logout_btn"):
+            st.session_state.authenticated = False
+            st.session_state.current_user = None
+            st.session_state.access_level = None
+            st.rerun()
+        
+        # Add dark mode toggle
+        if 'dark_mode' not in st.session_state:
+            st.session_state.dark_mode = False
+        dark_mode = st.toggle("🌙 Dark Mode", 
+                            value=st.session_state.dark_mode,
+                            key="legato_dark_mode_toggle")
+        if dark_mode != st.session_state.dark_mode:
+            st.session_state.dark_mode = dark_mode
+            st.rerun()
+    
+    # Initialize combined data
+    if 'combined_data' not in st.session_state:
+        st.session_state.combined_data = pd.DataFrame()
+    
+    # Data source options
+    analysis_option = st.radio(
+        "Choose data source:",
+        options=["Fetch from Google Sheets", "Upload new file"],
+        index=0,
+        horizontal=True,
+        key="data_source"
+    )
+    
+    if analysis_option == "Fetch from Google Sheets":
+        try:
+            import requests
+            from io import BytesIO
+            import urllib3
+            
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            google_sheets_url = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx'
+            
+            if st.button("🔄 Fetch Data", key="fetch_data_btn"):
+                with st.spinner("Fetching data from Google Sheets..."):
+                    response = requests.get(google_sheets_url, verify=False)
+                    
+                    # Read both sheets
+                    sea_data = pd.read_excel(BytesIO(response.content), sheet_name="SEA")
+                    air_data = pd.read_excel(BytesIO(response.content), sheet_name="AIR")
+                    
+                    # Standardize columns and add shipment type
+                    sea_data['Shipment Type'] = 'Sea'
+                    air_data['Shipment Type'] = 'Air'
+                    
+                    # Create common column mapping
+                    sea_columns = {
+                        'HBL': 'Tracking Number',
+                        'Inv #': 'Invoice Number',
+                        'PO #': 'PO Number',
+                        'CUSDEC No': 'Customs Declaration',
+                        'CUSDEC Date': 'Customs Date',
+                        'ETA': 'Arrival Date',
+                        'Shipper': 'Shipper',
+                        'Origin': 'Origin Country',
+                        'Port': 'Destination Port',
+                        'Description of Goods': 'Description',
+                        'Gross Weight': 'Weight',
+                        'No of Cartons': 'Cartons'
+                    }
+                    
+                    air_columns = {
+                        'HAWB': 'Tracking Number',
+                        'INVOICE #': 'Invoice Number',
+                        'PO #': 'PO Number',
+                        'CUSDEC NO': 'Customs Declaration',
+                        'CLEARANCE_PARSED': 'Customs Date',
+                        'ETA_PARSED': 'Arrival Date',
+                        'SHIPPER': 'Shipper',
+                        'COUNTRY OF ORIGIN': 'Origin Country',
+                        'CHARGEABLE WEIGHT': 'Weight',
+                        'CTNS': 'Cartons'
+                    }
+                    
+                    # Select and rename columns for sea data
+                    available_sea_cols = [col for col in sea_columns.keys() if col in sea_data.columns]
+                    sea_data = sea_data[available_sea_cols + ['Shipment Type']]
+                    sea_data = sea_data.rename(columns=sea_columns)
+                    
+                    # Select and rename columns for air data
+                    available_air_cols = [col for col in air_columns.keys() if col in air_data.columns]
+                    air_data = air_data[available_air_cols + ['Shipment Type']]
+                    air_data = air_data.rename(columns=air_columns)
+                    
+                    # Combine the data
+                    st.session_state.combined_data = pd.concat([sea_data, air_data], ignore_index=True)
+                    st.success("✅ Data fetched and consolidated successfully!")
+        
+        except Exception as e:
+            st.error(f"Failed to fetch data: {str(e)}")
+    
+    else:  # Upload new file
+        uploaded_file = st.file_uploader(
+            "Upload shipment file (Excel with SEA and AIR sheets)",
+            type=['xlsx'],
+            key='file_uploader'
+        )
+        
+        if uploaded_file:
+            try:
+                with st.spinner("Processing uploaded file..."):
+                    # Read both sheets
+                    sea_data = pd.read_excel(uploaded_file, sheet_name="SEA")
+                    air_data = pd.read_excel(uploaded_file, sheet_name="AIR")
+                    
+                    # Standardize columns and add shipment type
+                    sea_data['Shipment Type'] = 'Sea'
+                    air_data['Shipment Type'] = 'Air'
+                    
+                    # Create common column mapping (same as above)
+                    sea_columns = {
+                        'HBL': 'Tracking Number',
+                        'Inv #': 'Invoice Number',
+                        'PO #': 'PO Number',
+                        'CUSDEC No': 'Customs Declaration',
+                        'CUSDEC Date': 'Customs Date',
+                        'ETA': 'Arrival Date',
+                        'Shipper': 'Shipper',
+                        'Origin': 'Origin Country',
+                        'Port': 'Destination Port',
+                        'Description of Goods': 'Description',
+                        'Gross Weight': 'Weight',
+                        'No of Cartons': 'Cartons'
+                    }
+                    
+                    air_columns = {
+                        'HAWB': 'Tracking Number',
+                        'INVOICE #': 'Invoice Number',
+                        'PO #': 'PO Number',
+                        'CUSDEC NO': 'Customs Declaration',
+                        'CLEARANCE_PARSED': 'Customs Date',
+                        'ETA_PARSED': 'Arrival Date',
+                        'SHIPPER': 'Shipper',
+                        'COUNTRY OF ORIGIN': 'Origin Country',
+                        'CHARGEABLE WEIGHT': 'Weight',
+                        'CTNS': 'Cartons'
+                    }
+                    
+                    # Select and rename columns for sea data
+                    available_sea_cols = [col for col in sea_columns.keys() if col in sea_data.columns]
+                    sea_data = sea_data[available_sea_cols + ['Shipment Type']]
+                    sea_data = sea_data.rename(columns=sea_columns)
+                    
+                    # Select and rename columns for air data
+                    available_air_cols = [col for col in air_columns.keys() if col in air_data.columns]
+                    air_data = air_data[available_air_cols + ['Shipment Type']]
+                    air_data = air_data.rename(columns=air_columns)
+                    
+                    # Combine the data
+                    st.session_state.combined_data = pd.concat([sea_data, air_data], ignore_index=True)
+                    st.success("✅ Data uploaded and consolidated successfully!")
+            
+            except Exception as e:
+                st.error(f"Error processing file: {str(e)}")
+    
+    # Display and filter consolidated data
+    if not st.session_state.combined_data.empty:
+        st.success(f"✨ Consolidated data loaded! Total records: {len(st.session_state.combined_data):,}")
+        
+        # Key metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Shipments", len(st.session_state.combined_data))
+        with col2:
+            st.metric("Sea Shipments", len(st.session_state.combined_data[st.session_state.combined_data['Shipment Type'] == 'Sea']))
+        with col3:
+            st.metric("Air Shipments", len(st.session_state.combined_data[st.session_state.combined_data['Shipment Type'] == 'Air']))
+        
+        # Filters
+        st.markdown("### 🔎 Filter Shipments")
+        
+        # Create filter columns
+        filter_col1, filter_col2, filter_col3 = st.columns(3)
+        
+        with filter_col1:
+            # Shipment type filter
+            shipment_types = st.multiselect(
+                "Shipment Type",
+                options=st.session_state.combined_data['Shipment Type'].unique(),
+                default=st.session_state.combined_data['Shipment Type'].unique(),
+                key="shipment_type_filter"
+            )
+            
+            # Tracking number filter
+            tracking_numbers = st.multiselect(
+                "Tracking Number (HBL/HAWB)",
+                options=st.session_state.combined_data['Tracking Number'].dropna().unique(),
+                key="tracking_number_filter"
+            )
+        
+        with filter_col2:
+            # Invoice filter
+            invoice_numbers = st.multiselect(
+                "Invoice Number",
+                options=st.session_state.combined_data['Invoice Number'].dropna().unique(),
+                key="invoice_filter"
+            )
+            
+            # PO filter
+            po_numbers = st.multiselect(
+                "PO Number",
+                options=st.session_state.combined_data['PO Number'].dropna().unique(),
+                key="po_filter"
+            )
+        
+        with filter_col3:
+            # Customs declaration filter
+            customs_declarations = st.multiselect(
+                "Customs Declaration",
+                options=st.session_state.combined_data['Customs Declaration'].dropna().unique(),
+                key="customs_filter"
+            )
+            
+            # Shipper filter
+            shippers = st.multiselect(
+                "Shipper",
+                options=st.session_state.combined_data['Shipper'].dropna().unique(),
+                key="shipper_filter"
+            )
+        
+        # Apply filters
+        filtered_data = st.session_state.combined_data.copy()
+        
+        if shipment_types:
+            filtered_data = filtered_data[filtered_data['Shipment Type'].isin(shipment_types)]
+        if tracking_numbers:
+            filtered_data = filtered_data[filtered_data['Tracking Number'].isin(tracking_numbers)]
+        if invoice_numbers:
+            filtered_data = filtered_data[filtered_data['Invoice Number'].isin(invoice_numbers)]
+        if po_numbers:
+            filtered_data = filtered_data[filtered_data['PO Number'].isin(po_numbers)]
+        if customs_declarations:
+            filtered_data = filtered_data[filtered_data['Customs Declaration'].isin(customs_declarations)]
+        if shippers:
+            filtered_data = filtered_data[filtered_data['Shipper'].isin(shippers)]
+        
+        st.info(f"🔍 Showing {len(filtered_data):,} filtered records")
+        
+        # Display filtered data
+        with st.expander("🔍 View Filtered Data", expanded=True):
+            # Select columns to display (in desired order)
+            display_columns = [
+                'Shipment Type',
+                'Tracking Number',
+                'Invoice Number',
+                'PO Number',
+                'Shipper',
+                'Origin Country',
+                'Arrival Date',
+                'Customs Declaration',
+                'Customs Date',
+                'Weight',
+                'Cartons',
+                'Description'
+            ]
+            
+            # Ensure columns exist before selecting
+            available_cols = [col for col in display_columns if col in filtered_data.columns]
+            display_df = filtered_data[available_cols]
+            
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                height=400
+            )
+        
+        # Download buttons
+        st.markdown("---")
+        csv = filtered_data.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="💾 Download Filtered Data",
+            data=csv,
+            file_name='legato_consolidated_shipments.csv',
+            mime='text/csv',
+            key="consolidated_data_download"
+        )
+
+
+def run_business_app():
+    st.title("📊 Business Team - Shipment Overview")
+    
+    # Initialize sidebar as closed by default
+    st.markdown("""
+    <style>
+        [data-testid="collapsedControl"] {
+            display: none
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Add logout button to sidebar
+    with st.sidebar:
+        if st.button("🚪 Logout", key="business_logout_btn"):
+            st.session_state.authenticated = False
+            st.session_state.current_user = None
+            st.session_state.access_level = None
+            st.rerun()
+        
+        # Add dark mode toggle
+        if 'dark_mode' not in st.session_state:
+            st.session_state.dark_mode = False
+        dark_mode = st.toggle("🌙 Dark Mode", 
+                            value=st.session_state.dark_mode,
+                            key="business_dark_mode_toggle")
+        if dark_mode != st.session_state.dark_mode:
+            st.session_state.dark_mode = dark_mode
+            st.rerun()
+    
+    # Create tabs for shipment types
+    sea_tab, air_tab = st.tabs(["🌊 Sea Shipments", "✈️ Air Shipments"])
+    
+    with sea_tab:
+        with st.container(border=True):        
+            # Initialize combined as empty DataFrame
+            combined = pd.DataFrame()
+            
+            # Data source options
+            analysis_option = st.radio(
+                "Choose data source:",
+                options=["Fetch from Google Sheets", "Use previously processed data", "Upload new file"],
+                index=0,
+                horizontal=True,
+                key="business_sea_data_source"
+            )
+            
+            if analysis_option == "Fetch from Google Sheets":
+                try:
+                    response = requests.get("https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx", verify=False)
+                    combined = pd.read_excel(BytesIO(response.content), sheet_name="SEA_Merchant")
+                    st.success("✅ Sea data fetched successfully!")
+                except Exception as e:
+                    st.error(f"Failed to fetch sea data: {str(e)}")
+
+            elif analysis_option == "Upload new file":
+                sea_file = st.file_uploader(
+                    "Upload sea shipment file",
+                    type=['xlsx', 'csv'],
+                    key='business_sea_file_uploader'
+                )
+                if sea_file:
+                    try:
+                        if sea_file.name.endswith('.csv'):
+                            combined = pd.read_csv(sea_file)
+                        else:
+                            combined = pd.read_excel(sea_file, sheet_name="SEA")
+                    except Exception as e:
+                        st.error(f"Error reading file: {str(e)}")
+            else:
+                if (st.session_state.expo_processed or st.session_state.maersk_processed or 
+                    st.session_state.globe_processed or st.session_state.scanwell_processed):
+                    combined = pd.concat([
+                        st.session_state.expo_data,
+                        st.session_state.maersk_data,
+                        st.session_state.globe_data,
+                        st.session_state.scanwell_data
+                    ], ignore_index=True)
+                else:
+                    st.warning("No processed sea data available")
+            
+            # Sea shipment display and filtering
+            if not combined.empty:
+                st.success(f"✨ Sea data loaded! Records: {len(combined):,}")
+                
+                # Sea shipment metrics
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Unique HBLs", combined['HBL'].nunique())
+                    if 'PO #' in combined.columns:
+                        st.metric("Unique POs", combined['PO #'].nunique())
+                with col2:
+                    if 'Gross Weight' in combined.columns:
+                        try:
+                            total_weight = combined['Gross Weight'].sum()
+                            st.metric("Total Gross Weight", f"{total_weight:,.2f} kg")
+                        except Exception as e:
+                            st.metric("Total Weight", f"Error: {str(e)}")
+                    else:
+                        st.metric("Total Weight", "Column not found")
+
+                # Sea shipment filters
+                st.markdown("### 🔎 Filter Sea Records")
+                filter_col1, filter_col2 = st.columns(2)
+
+                with filter_col1:
+                    selected_hbls = st.multiselect(
+                        "Filter by HBL",
+                        options=combined['HBL'].dropna().unique(),
+                        key="business_sea_hbl_filter"
+                    )
+                    
+                    if 'PO #' in combined.columns:
+                        selected_pos = st.multiselect(
+                            "Filter by PO #",
+                            options=combined['PO #'].dropna().unique(),
+                            key="business_sea_po_filter"
+                        )
+
+                with filter_col2:
+                    if 'ETA' in combined.columns:
+                        combined['ETA'] = pd.to_datetime(combined['ETA'], errors='coerce')
+                        selected_eta_dates = st.multiselect(
+                            "Filter by ETA Date",
+                            options=combined['ETA'].dt.date.dropna().unique(),
+                            key="business_sea_eta_filter"
+                        )
+                    
+                    if 'Origin Vessel' in combined.columns:
+                        selected_vessels = st.multiselect(
+                            "Filter by Vessel",
+                            options=combined['Origin Vessel'].dropna().unique(),
+                            key="business_sea_vessel_filter"
+                        )
+
+                # Apply filters
+                filtered_sea = combined.copy()
+                if selected_hbls:
+                    filtered_sea = filtered_sea[filtered_sea['HBL'].isin(selected_hbls)]
+                if 'PO #' in combined.columns and 'selected_pos' in locals() and selected_pos:
+                    filtered_sea = filtered_sea[filtered_sea['PO #'].isin(selected_pos)]
+                if 'ETA' in combined.columns and 'selected_eta_dates' in locals() and selected_eta_dates:
+                    filtered_sea = filtered_sea[filtered_sea['ETA'].dt.date.isin(selected_eta_dates)]
+                if 'Origin Vessel' in combined.columns and 'selected_vessels' in locals() and selected_vessels:
+                    filtered_sea = filtered_sea[filtered_sea['Origin Vessel'].isin(selected_vessels)]
+
+                st.info(f"🔍 Showing {len(filtered_sea):,} filtered sea records")
+
+                # Delivery Status Legend
+                st.markdown("""
+                <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
+                    <div style="width: 20px; height: 20px; background-color: lightgreen; border: 1px solid #ccc;"></div>
+                    <span>Delivered</span>
+                    <div style="width: 20px; height: 20px; background-color: transparent; border: 1px solid #ccc; margin-left: 10px;"></div>
+                    <span>Pending</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Show filtered data with delivery status
+                if 'Delivery date' in filtered_sea.columns:
+                    try:
+                        # Create display dataframe
+                        sea_display_columns = {
+                            "HBL": "HBL",
+                            "PO #": "PO #",
+                            "ETA": "ETA",
+                            "Origin": "Origin",
+                            "Port": "Port",
+                            "Shipper": "Shipper",
+                            "Consignee": "Consignee",
+                            "Inv #": "Inv #",
+                            "Description": "Description",
+                            "Delivery date": "Delivery date"
+                        }
+                        
+                        available_cols = [col for col in sea_display_columns.keys() if col in filtered_sea.columns]
+                        renamed_cols = {col: sea_display_columns[col] for col in available_cols}
+                        display_sea_df = filtered_sea.drop(columns=["Sheet"], errors="ignore")
+
+                        # Apply color formatting
+                        def color_delivery_status(row):
+                            if pd.notna(row['Delivery date']):
+                                return ['background-color: lightgreen'] * len(row)
+                            return [''] * len(row)
+                        
+                        with st.expander("🔍 View Filtered Sea Data", expanded=True):
+                            st.dataframe(
+                                display_sea_df.style.apply(color_delivery_status, axis=1),
+                                use_container_width=True,
+                                height=400
+                            )
+                        
+                        # Delivery status metrics
+                        st.markdown("### 🚚 Delivery Status Overview")
+                        delivery_counts = {
+                            'Delivered': filtered_sea['Delivery date'].notna().sum(),
+                            'Pending': len(filtered_sea) - filtered_sea['Delivery date'].notna().sum()
+                        }
+                        
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            st.dataframe(
+                                pd.DataFrame.from_dict(delivery_counts, orient='index', columns=['Count']),
+                                width=200
+                            )
+                        
+                        with col2:
+                            fig = px.pie(
+                                values=list(delivery_counts.values()),
+                                names=list(delivery_counts.keys()),
+                                color=list(delivery_counts.keys()),
+                                color_discrete_map={'Delivered':'lightgreen','Pending':'lightgray'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                    except Exception as e:
+                        st.warning(f"Couldn't process delivery status: {e}")
+                        with st.expander("🔍 View Filtered Data", expanded=True):
+                            st.dataframe(
+                                filtered_sea,
+                                use_container_width=True,
+                                height=400
+                            )
+                else:
+                    with st.expander("🔍 View Filtered Data", expanded=True):
+                        st.dataframe(
+                            filtered_sea,
+                            use_container_width=True,
+                            height=400
+                        )
+                
+                # Download buttons
+                st.markdown("---")
+                csv = filtered_sea.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="💾 Download Filtered Sea Data",
+                    data=csv,
+                    file_name='business_filtered_sea_data.csv',
+                    mime='text/csv',
+                    key="business_sea_data_download"
+                )
+    
+    with air_tab:
+        with st.container(border=True):
+            # Initialize air data
+            if 'air_data' not in st.session_state:
+                st.session_state.air_data = pd.DataFrame()
+            
+            # Air data source options
+            air_source = st.radio(
+                "Choose air data source:",
+                options=["Fetch from Google Sheets", "Upload new file"],
+                index=0,
+                horizontal=True,
+                key="business_air_data_source"
+            )
+            
+            if air_source == "Fetch from Google Sheets":
+                if st.button("🔄 Fetch Air Data", key="business_fetch_air_data_btn"):
+                    try:
+                        response = requests.get("https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx", verify=False)
+                        st.session_state.air_data = pd.read_excel(BytesIO(response.content), sheet_name="AIR")
+                        st.success("✅ Air data fetched successfully!")
+                    except Exception as e:
+                        st.error(f"Failed to fetch air data: {str(e)}")
+            else:
+                air_file = st.file_uploader(
+                    "Upload air shipment file",
+                    type=['xlsx', 'csv'],
+                    key='business_air_file_uploader'
+                )
+                if air_file:
+                    if air_file.name.endswith('.xlsx'):
+                        try:
+                            st.session_state.air_data = pd.read_excel(air_file, sheet_name="AIR")
+                            st.success("Air data uploaded successfully!")
+                        except ValueError:
+                            st.error("Sheet named 'AIR' not found in the uploaded Excel file.")
+                    else:
+                        st.session_state.air_data = pd.read_csv(air_file)
+                        st.success("Air data CSV uploaded successfully!")
+            
+            # Air shipment display and filtering
+            if not st.session_state.air_data.empty:
+                st.success(f"✈️ Air data loaded! Records: {len(st.session_state.air_data):,}")
+                
+                # Air shipment metrics
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Unique HAWBs", st.session_state.air_data['HAWB'].nunique())
+
+                with col2:
+                    if 'PO #' in st.session_state.air_data.columns:
+                        st.metric("Unique POs", st.session_state.air_data['PO #'].nunique())
+
+
+                # Air shipment filters
+                st.markdown("### 🔎 Filter Air Records")
+                filter_col1, filter_col2 = st.columns(2)
+
+                with filter_col1:
+                    selected_hawbs = st.multiselect(
+                        "Filter by HAWB",
+                        options=st.session_state.air_data['HAWB'].dropna().unique(),
+                        key="business_air_hawb_filter"
+                    )
+                    
+                    if 'PO #' in st.session_state.air_data.columns:
+                        selected_pos = st.multiselect(
+                            "Filter by PO #",
+                            options=st.session_state.air_data['PO #'].dropna().unique(),
+                            key="business_air_po_filter"
+                        )
+
+                with filter_col2:
+                    if 'INVOICE #' in st.session_state.air_data.columns:
+                        selected_invs = st.multiselect(
+                            "Filter by Invoice #",
+                            options=st.session_state.air_data['INVOICE #'].dropna().unique(),
+                            key="business_air_inv_filter"
+                        )
+                    
+                    if 'SHIPPER' in st.session_state.air_data.columns:
+                        selected_shippers = st.multiselect(
+                            "Filter by Shipper",
+                            options=st.session_state.air_data['SHIPPER'].dropna().unique(),
+                            key="business_air_shipper_filter"
+                        )
+
+                # Apply filters
+                filtered_air = st.session_state.air_data.copy()
+                if selected_hawbs:
+                    filtered_air = filtered_air[filtered_air['HAWB'].isin(selected_hawbs)]
+                if 'PO #' in st.session_state.air_data.columns and 'selected_pos' in locals() and selected_pos:
+                    filtered_air = filtered_air[filtered_air['PO #'].isin(selected_pos)]
+                if 'INVOICE #' in st.session_state.air_data.columns and 'selected_invs' in locals() and selected_invs:
+                    filtered_air = filtered_air[filtered_air['INVOICE #'].isin(selected_invs)]
+                if 'SHIPPER' in st.session_state.air_data.columns and 'selected_shippers' in locals() and selected_shippers:
+                    filtered_air = filtered_air[filtered_air['SHIPPER'].isin(selected_shippers)]
+
+                st.info(f"🔍 Showing {len(filtered_air):,} filtered air records")
+
+
+
+            # Show filtered air data with delivery status
+                try:
+                    # Select and rename columns for air shipment display
+                    air_display_columns = {
+                        "INVOICE #": "Invoice #",
+                        "PO #": "PO #",
+                        "SHIPPER": "Shipper",
+                        "CONSIGNEE": "Consignee",
+                        "INCOTERM": "Incoterm",
+                        "COUNTRY OF ORIGIN": "Country of Origin",
+                        "CTNS": "CTNS",
+                        "CHARGEABLE WEIGHT": "Chargeable Weight",
+                        "HAWB": "HAWB",
+                        "MAWB": "MAWB",
+                        "CUSDEC NO": "Cusdec No",
+                        "VEHIECAL NO": "Vehicle No",
+                        "SEAL NO": "Seal No",
+                        "ETA_PARSED": "ETA DATE",
+                        "CLEARANCE_PARSED": "Clearance Date"
+                    }
+
+                    # Ensure only available columns are included in the display
+                    available_cols = [col for col in air_display_columns.keys() if col in filtered_air.columns]
+                    renamed_cols = {col: air_display_columns[col] for col in available_cols}
+                    
+                    # Prepare the data for display
+                    display_air_df = filtered_air[available_cols].rename(columns=renamed_cols)
+
+                    # Apply color formatting based on delivery status (all delivered, so we skip this part)
+                    def color_air_delivery_status(row):
+                        return [''] * len(row)  # No background-color needed as all are delivered
+
+                    with st.expander("🔍 View Filtered Air Data", expanded=True):
+                        st.dataframe(
+                            display_air_df,
+                            use_container_width=True,
+                            height=400
+                        )
+
+                except Exception as e:
+                    st.warning(f"Couldn't process air shipment data: {e}")
+                    with st.expander("🔍 View Filtered Data", expanded=True):
+                        st.dataframe(
+                            filtered_air,
+                            use_container_width=True,
+                            height=400
+                        )
+
+     
+            
+                # Download buttons
+                st.markdown("---")
+                csv = filtered_air.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="💾 Download Filtered Air Data",
+                    data=csv,
+                    file_name='business_filtered_air_data.csv',
+                    mime='text/csv',
+                    key="business_air_data_download"
+                )
+
+
 
 if __name__ == "__main__":
     main()
