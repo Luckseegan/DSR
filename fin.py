@@ -5,14 +5,20 @@ from rapidfuzz import process, fuzz
 import re
 from datetime import datetime
 import plotly.express as px
-# Add these imports at the top
+import requests
+from io import BytesIO
+import pandas as pd
+import streamlit as st
 from auth import AuthManager
 import streamlit_authenticator as stauth
 import requests
 from io import BytesIO
 import time
 import difflib
-
+from functools import lru_cache
+import pandas as pd
+import requests
+from io import BytesIO
 import tempfile
 
 
@@ -44,6 +50,28 @@ class ConfigurationManager:
                 "fuzzy_threshold": 45,
                 "default_bond_type": "FCL"
             },
+            "data_sources": {
+            "china": {
+                "bookings_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vRURi444OvCBzhhE8JpoT7B3H-M7Jdx-TYX0yPJ4DbfWcgIYZ1BPU13xB9vfujUow/pub?output=xlsx",
+                "delivery_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx",
+                "sheets": {
+                    "bookings": {
+                        "default_sheet": "MAY 2025",
+                        "tracker_sheet": "AIR"
+                    },
+                    "delivery": {
+                        "air_sheet": "AIR",
+                        "sea_sheet": "SEA"
+                    }
+                }
+            },
+            "india": {
+                "bookings_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQh9PCBs5Z-aq1QV_gBuXYlkv2bjm0-12An8yqVpzntQNctS-vdis7oVnaJ-2BA8J3sCp8U9vYMd2Nh/pub?output=xlsx",
+                "default_sheet": "APRIL 25-26",
+                "tracker_sheet": "AIR"
+            }
+            }       
+            ,
             "columns": [
                 "HBL", "ETA", "SBU", "CARGO READY DATE", "Origin", "Port", 
                 "Shipper", "Inv #", "PO #", "Description of Goods", "No of Cartons",
@@ -389,7 +417,7 @@ def show_configuration_ui():
     st.sidebar.header("Configuration")
     
     with st.sidebar.expander("⚙️ Settings", expanded=False):
-        tab1, tab2, tab3 = st.tabs(["Columns", "Mappings", "Global"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Columns", "Mappings", "Global", "Data Sources"])
         
         with tab1:
             show_column_management()
@@ -399,6 +427,9 @@ def show_configuration_ui():
             
         with tab3:
             show_global_settings()
+
+        with tab4:
+            show_data_sources_management()
 
 def show_column_management():
     st.subheader("Column Management")
@@ -557,8 +588,119 @@ def show_global_settings():
         else:
             st.error("Failed to save global settings")
 
-
-
+def show_data_sources_management():
+    st.subheader("Data Source Configuration")
+    
+    region = st.selectbox(
+        "Select Region",
+        ["china", "india"],
+        key="data_source_region"
+    )
+    
+    st.markdown("---")
+    st.subheader(f"{region.upper()} Configuration")
+    
+    # Get current config for the region
+    region_config = config_manager.config["data_sources"].get(region, {})
+    
+    # URLs
+    col1, col2 = st.columns(2)
+    with col1:
+        bookings_url = st.text_input(
+            "Bookings URL",
+            value=region_config.get("bookings_url", ""),
+            key=f"{region}_bookings_url"
+        )
+    
+    if region == "china":
+        with col2:
+            delivery_url = st.text_input(
+                "Delivery URL",
+                value=region_config.get("delivery_url", ""),
+                key=f"{region}_delivery_url"
+            )
+    
+    # Sheet names
+    st.subheader("Sheet Names")
+    
+    if region == "china":
+        # Initialize sheets config if not exists
+        if "sheets" not in region_config:
+            region_config["sheets"] = {
+                "bookings": {},
+                "delivery": {}
+            }
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            bookings_sheet = st.text_input(
+                "Default Bookings Sheet",
+                value=region_config["sheets"]["bookings"].get("default_sheet", ""),
+                key=f"{region}_bookings_sheet"
+            )
+            
+            tracker_sheet = st.text_input(
+                "Tracker Sheet (Bookings)",
+                value=region_config["sheets"]["bookings"].get("tracker_sheet", ""),
+                key=f"{region}_tracker_sheet"
+            )
+        
+        with col2:
+            air_sheet = st.text_input(
+                "AIR Delivery Sheet",
+                value=region_config["sheets"]["delivery"].get("air_sheet", ""),
+                key=f"{region}_air_sheet"
+            )
+            
+            sea_sheet = st.text_input(
+                "SEA Delivery Sheet",
+                value=region_config["sheets"]["delivery"].get("sea_sheet", ""),
+                key=f"{region}_sea_sheet"
+            )
+    else:  # india
+        default_sheet = st.text_input(
+            "Default Sheet",
+            value=region_config.get("default_sheet", ""),
+            key=f"{region}_default_sheet"
+        )
+        
+        tracker_sheet = st.text_input(
+            "Tracker Sheet",
+            value=region_config.get("tracker_sheet", ""),
+            key=f"{region}_tracker_sheet"
+        )
+    
+    if st.button("Save Data Source Configuration", key=f"save_{region}_data_source"):
+        # Update the config structure
+        if region not in config_manager.config["data_sources"]:
+            config_manager.config["data_sources"][region] = {}
+        
+        # Update URLs
+        config_manager.config["data_sources"][region]["bookings_url"] = bookings_url
+        if region == "china":
+            config_manager.config["data_sources"][region]["delivery_url"] = delivery_url
+        
+        # Update sheet names
+        if region == "china":
+            if "sheets" not in config_manager.config["data_sources"][region]:
+                config_manager.config["data_sources"][region]["sheets"] = {
+                    "bookings": {},
+                    "delivery": {}
+                }
+            
+            config_manager.config["data_sources"][region]["sheets"]["bookings"]["default_sheet"] = bookings_sheet
+            config_manager.config["data_sources"][region]["sheets"]["bookings"]["tracker_sheet"] = tracker_sheet
+            config_manager.config["data_sources"][region]["sheets"]["delivery"]["air_sheet"] = air_sheet
+            config_manager.config["data_sources"][region]["sheets"]["delivery"]["sea_sheet"] = sea_sheet
+        else:
+            config_manager.config["data_sources"][region]["default_sheet"] = default_sheet
+            config_manager.config["data_sources"][region]["tracker_sheet"] = tracker_sheet
+        
+        if config_manager.save_config():
+            st.success("Data source configuration saved!")
+            st.rerun()
+        else:
+            st.error("Failed to save configuration")
 
 
 def init_session_state():
@@ -3308,13 +3450,13 @@ def run_admin_app():
 
 
 
-        with config_tab:
+    with config_tab:
             st.header("⚙️ System Configuration")
             
             # Use your existing configuration UI function but remove sidebar references
             def show_config_tab_ui():
                 with st.expander("⚙️ Settings", expanded=True):  # Changed from sidebar.expander
-                    tab1, tab2, tab3 = st.tabs(["Columns", "Mappings", "Global"])
+                    tab1, tab2, tab3, tab4 = st.tabs(["Columns", "Mappings", "Global", "Data Sources"])
                     
                     with tab1:
                         show_column_management()
@@ -3324,6 +3466,9 @@ def run_admin_app():
                         
                     with tab3:
                         show_global_settings()
+
+                    with tab4:
+                        show_data_sources_management()
             
             # User management section
             show_admin_panel()
@@ -3632,7 +3777,274 @@ def run_legato_app():
         )
 
 
+## China
+@st.cache_data(ttl=1800)
+def fetch_bookings_bytes(region="china"):
+    url = config_manager.config["data_sources"][region]["bookings_url"]
+    response = requests.get(url, verify=False)
+    return response.content
+
+def load_bookings_data(region="china"):
+    content = fetch_bookings_bytes(region)
+    xls = pd.ExcelFile(BytesIO(content))
+    
+    # Get default sheet from config
+    if region == "china":
+        default_sheet = config_manager.config["data_sources"][region]["sheets"]["bookings"]["default_sheet"]
+    else:
+        default_sheet = config_manager.config["data_sources"][region]["default_sheet"]
+    
+    # Verify sheet exists
+    if default_sheet not in xls.sheet_names:
+        st.warning(f"Default sheet '{default_sheet}' not found. Using first sheet.")
+        default_sheet = xls.sheet_names[0]
+    
+    return xls, default_sheet
+
+
+
+
+@st.cache_data(ttl=1800)
+def fetch_delivery_status_bytes(region="china"):
+    url = config_manager.config["data_sources"][region]["delivery_url"]    
+    response = requests.get(url, verify=False)
+    return response.content
+
+def load_delivery_status_data(region="china"):
+    content = fetch_delivery_status_bytes(region)
+    xls = pd.ExcelFile(BytesIO(content))  # Only this part is repeated
+    return xls
+
+@st.cache_data
+def load_sheet_data_cached(_xls, sheet_name):
+    return pd.read_excel(_xls, sheet_name=sheet_name)
+
+
+
+
+def booking_tracker_horizontal_clean(df, delivery_df):
+    if df.empty:
+        st.markdown("### 🚚 Booking Status Tracker (Loading...)")
+        st.markdown("<div style='height: 100px; background: #f0f0f0; border-radius: 8px;'></div>", unsafe_allow_html=True)
+        return
+
+    row = df.iloc[0]
+    so_number = str(row.get("S/O", "")).strip()
+    hawb_key = f"VLL{so_number}"
+
+    # Booking Received
+    booking_date = pd.to_datetime(row.get("Booking received date", None), errors='coerce')
+    booking_display = booking_date.strftime('%Y-%m-%d') if pd.notna(booking_date) else "—"
+
+    # Booking Confirmed
+    etd = row.get("ETD", None)
+    eta = row.get("ETA updated", None)
+    confirmed_active = pd.notna(etd) or pd.notna(eta)
+
+    # Flight Assigned
+    remarks = str(row.get("REMARKS", ""))
+    has_mawb = bool(re.search(r'\d{3}-\d{8}', remarks))
+    etd_date = pd.to_datetime(etd, errors='coerce')
+    etd_display = f"ETD: {etd_date.strftime('%Y-%m-%d')}" if pd.notna(etd_date) else "ETD: —"
+
+    # Delivered Stage: Load and match delivery sheet
+    try:
+        delivery_xls = load_delivery_status_data("china")
+        air_sheet = config_manager.config["data_sources"]["china"]["sheets"]["delivery"]["air_sheet"]
+        delivery_df = pd.read_excel(delivery_xls, sheet_name=air_sheet)
+        delivery_match = delivery_df[delivery_df["HAWB"].astype(str).str.contains(hawb_key, case=False, na=False)]
+
+        delivered_active = not delivery_match.empty
+        clearance_date = delivery_match["CLEARANCE DEAT"].iloc[0] if delivered_active else "—"
+        consignee = delivery_match["CONSIGNEE"].iloc[0] if delivered_active else "—"
+        vehicle_no = delivery_match["VEHIECAL NO"].iloc[0] if delivered_active else "—"
+
+        clearance_display = f"Clearance: {clearance_date}" if pd.notna(clearance_date) else "Clearance: —"
+        extra_details = f"Consignee: {consignee}<br>Vehicle No: {vehicle_no}" if delivered_active else ""
+
+    except Exception as e:
+        st.warning(f"Could not load delivery status: {e}")
+        delivered_active = False
+        clearance_display = "Clearance: —"
+        extra_details = ""
+
+    # Tracker stages
+    stages = [
+        {"icon": "🟢", "name": "Booking Received", "date": booking_display},
+        {"icon": "🟢" if confirmed_active else "⚪", "name": "Booking Confirmed", "date": "—"},
+        {"icon": "🟢" if has_mawb else "⚪", "name": "Flight Assigned", "date": etd_display},
+        {
+            "icon": "🟢" if delivered_active else "⚪",
+            "name": "Delivered",
+            "date": clearance_display,
+            "details": extra_details
+        },
+    ]
+
+    # Render horizontal tracker
+    tracker_html = "<div style='display: flex; justify-content: space-around; align-items: flex-start;'>"
+    for i, stage in enumerate(stages):
+        tracker_html += f"""
+        <div style='text-align: center; font-size: 16px;'>
+            <div style='font-size: 24px;'>{stage['icon']}</div>
+            <div><strong>{stage['name']}</strong></div>
+            <div style='font-size: 12px; color: gray;'>{stage['date']}</div>
+        """
+        if "details" in stage and stage["details"]:
+            tracker_html += f"<div style='font-size: 11px; color: #444;'>{stage['details']}</div>"
+        tracker_html += "</div>"
+
+        if i < len(stages) - 1:
+            tracker_html += "<div style='font-size: 24px; margin: 0 10px;'>➡️</div>"
+
+    tracker_html += "</div>"
+
+    st.markdown("### 🚚 Booking Status Tracker")
+    st.markdown(
+    "<div style='margin-bottom: 10px; font-size: 14px;'>"
+    "🟢 <span style='color: green;'>Completed</span> &nbsp;&nbsp;&nbsp; "
+    "⚪ <span style='color: gray;'>Pending</span>"
+    "</div>",
+    unsafe_allow_html=True
+    )
+    st.markdown(tracker_html, unsafe_allow_html=True)
+
+
+# India
+# Function to fetch and load India booking data
+@st.cache_data(ttl=1800)
+def fetch_india_bookings_bytes():
+    url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQh9PCBs5Z-aq1QV_gBuXYlkv2bjm0-12An8yqVpzntQNctS-vdis7oVnaJ-2BA8J3sCp8U9vYMd2Nh/pub?output=xlsx"
+    response = requests.get(url, verify=False)
+    return response.content
+
+
+def load_india_bookings_data():
+    content = fetch_india_bookings_bytes()
+    xls = pd.ExcelFile(BytesIO(content))
+    return xls
+
+
+def india_booking_tracker(booking_row):
+    if booking_row.empty:
+        st.info("No booking data available for tracker.")
+        return
+
+    # Bookings Received
+    received_date = pd.to_datetime(booking_row.get("Booking received date", None), errors='coerce')
+    received_active = pd.notna(received_date)
+    received_display = received_date.strftime('%Y-%m-%d') if received_active else "—"
+
+    # Booking Confirmed
+    confirmed_active = pd.notna(pd.to_datetime(booking_row.get("Approval Received Date", None), errors='coerce'))
+
+    # Flight Assigned
+    etd_date = pd.to_datetime(booking_row.get("ETD", None), errors='coerce')
+    etd_active = pd.notna(etd_date)
+    etd_display = etd_date.strftime('%Y-%m-%d') if etd_active else "—"
+
+    # Delivered Stage
+    hawb_col = next((col for col in booking_row.index if "hawb" in col.lower()), None)
+    hawb_no = str(booking_row.get(hawb_col, "")).strip() if hawb_col else ""
+
+    delivered_active = False
+    delivered_display = "—"
+
+    if hawb_no:
+        delivery_df = st.session_state.get("delivery_air_df", pd.DataFrame())
+        delivery_col = next((col for col in delivery_df.columns if "hawb" in col.lower()), None)
+
+        if delivery_col:
+            delivery_match = delivery_df[delivery_df[delivery_col].astype(str).str.strip() == hawb_no]
+
+            if not delivery_match.empty:
+                delivered_date = pd.to_datetime(delivery_match.iloc[0].get("Delivered Date", None), errors='coerce')
+                delivered_active = pd.notna(delivered_date)
+                if delivered_active:
+                    delivered_display = delivered_date.strftime('%Y-%m-%d')
+
+    # Tracker stages
+    stages = [
+        {"icon": "🟢" if received_active else "⚪", "name": "Bookings Received", "date": received_display},
+        {"icon": "🟢" if confirmed_active else "⚪", "name": "Booking Confirmed", "date": None},
+        {"icon": "🟢" if etd_active else "⚪", "name": "Flight Assigned", "date": etd_display},
+        {"icon": "🟢" if delivered_active else "⚪", "name": "Delivered", "date": delivered_display},
+    ]
+
+    # Render tracker
+    tracker_html = "<div style='display: flex; justify-content: space-around; align-items: flex-start;'>"
+    for i, stage in enumerate(stages):
+        tracker_html += f"""
+        <div style='text-align: center; font-size: 16px;'>
+            <div style='font-size: 24px;'>{stage['icon']}</div>
+            <div><strong>{stage['name']}</strong></div>
+        """
+        if stage["date"]:
+            tracker_html += f"<div style='font-size: 12px; color: gray;'>{stage['date']}</div>"
+        tracker_html += "</div>"
+
+        if i < len(stages) - 1:
+            tracker_html += "<div style='font-size: 24px; margin: 0 10px;'>➡️</div>"
+
+    tracker_html += "</div>"
+
+    st.markdown("### 📦 Booking Status Tracker")
+    st.markdown(
+        "<div style='margin-bottom: 10px; font-size: 14px;'>"
+        "🟢 <span style='color: green;'>Completed</span> &nbsp;&nbsp;&nbsp; "
+        "⚪ <span style='color: gray;'>Pending</span>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown(tracker_html, unsafe_allow_html=True)
+
+
 def run_business_app():
+
+    # Initialize loading states
+    if 'data_loaded' not in st.session_state:
+        st.session_state.data_loaded = False
+    
+    # Show loading placeholder if data not loaded yet
+    if not st.session_state.data_loaded:
+        with st.container():
+            st.markdown("""
+            <div style="text-align: center; padding: 50px;">
+                <h2>📊 Loading Business Dashboard</h2>
+                <p>Please wait while we load your shipment data...</p>
+                <div class="spinner"></div>
+            </div>
+            <style>
+                .spinner {
+                    border: 5px solid #f3f3f3;
+                    border-top: 5px solid #3498db;
+                    border-radius: 50%;
+                    width: 50px;
+                    height: 50px;
+                    animation: spin 1s linear infinite;
+                    margin: 20px auto;
+                }
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            </style>
+            """, unsafe_allow_html=True)
+        
+        # Load data in the background
+        try:
+            # Initialize data
+            if "delivery_air_df" not in st.session_state:
+                delivery_xls = pd.ExcelFile(BytesIO(fetch_delivery_status_bytes()))
+                st.session_state.delivery_air_df = pd.read_excel(delivery_xls, sheet_name="AIR")
+            
+            st.session_state.data_loaded = True
+            st.rerun()  # Refresh to show the actual content
+            
+        except Exception as e:
+            st.error(f"Failed to load data: {str(e)}")
+        return
+
     st.title("📊 Business Team - Shipment Overview")
     
     # Initialize sidebar as closed by default
@@ -3663,8 +4075,244 @@ def run_business_app():
             st.rerun()
     
     # Create tabs for shipment types
-    sea_tab, air_tab = st.tabs(["🌊 Sea Shipments", "✈️ Air Shipments"])
-    
+    bookings_tab, sea_tab, air_tab = st.tabs(["📅 Current Bookings Air","🌊 Sea Delivery Status", "✈️ Air Delivered Status"])
+
+
+    with bookings_tab:
+        with st.container(border=True):
+            china_tab, india_tab, other_tab = st.tabs(["China/HK", "India", "Other Regions"])
+
+            with china_tab:
+
+                try:
+                    xls,_ = load_bookings_data("china")
+
+                    all_sheets = xls.sheet_names
+                    month_sheets = []
+                    for sheet in all_sheets:
+                        if any(month.lower() in sheet.lower() for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                                                                            'jul', 'aug', 'sep', 'oct', 'nov', 'dec']):
+                            month_sheets.append(sheet)
+                        elif re.search(r'\d{1,2}[-/]\d{4}', sheet):
+                            month_sheets.append(sheet)
+
+                    if not month_sheets:
+                        month_sheets = all_sheets
+                        st.warning("No month/year patterns detected in sheet names - showing all sheets")
+
+                    def sort_sheets_by_date(sheet_list):
+                        dated_sheets = []
+                        for sheet in sheet_list:
+                            try:
+                                dt = pd.to_datetime(sheet, errors='coerce')
+                                if pd.notna(dt):
+                                    dated_sheets.append((dt, sheet))
+                            except:
+                                continue
+                        dated_sheets.sort(reverse=True, key=lambda x: x[0])
+                        return [sheet for (dt, sheet) in dated_sheets]
+
+                    sorted_sheets = sort_sheets_by_date(month_sheets)
+                    if not sorted_sheets:
+                        sorted_sheets = month_sheets[::-1]
+
+                    col1, col2 = st.columns([2, 3])
+
+                    with col1:
+                        selected_sheet = st.selectbox(
+                            "Select Month Sheet",
+                            options=sorted_sheets,
+                            index=0,
+                            key="china_sheet_select"
+                        )
+
+                    # Load sheet only once per session or when sheet changes
+                    if 'china_last_sheet' not in st.session_state or st.session_state.china_last_sheet != selected_sheet:
+                        df = load_sheet_data_cached(xls, selected_sheet)
+                        st.session_state.china_booking_df = df
+                        st.session_state.china_last_sheet = selected_sheet
+                        st.session_state.current_booking = pd.DataFrame()
+
+                    df = st.session_state.china_booking_df 
+
+                    with col2:
+                        filter_mode = st.radio("Filter by", options=["S/O", "PO #"], horizontal=True, key="filter_mode_choice")
+
+                        if filter_mode == "S/O":
+                            # Clear selected_so since we’re not using it in this mode
+                            st.session_state.selected_so = None
+
+                            so_input = st.text_input("Enter S/O Number:", key="china_so_input")
+
+                            if so_input:
+                                booking = df[df['S/O'].astype(str).str.contains(so_input, case=False, na=False)]
+                                if not booking.empty:
+                                    st.session_state.current_booking = booking
+                                else:
+                                    st.warning("No booking found with that S/O number.")
+                                    st.session_state.current_booking = pd.DataFrame()  # Clear if nothing found
+
+
+                        else:  # Filter by PO #
+                            po_input = st.text_input("Enter PO Number:", key="china_po_input")
+
+                            if po_input:
+                                matching_po_rows = df[df['PO #'].astype(str).str.contains(po_input, case=False, na=False)]
+
+                                if not matching_po_rows.empty:
+                                    so_options = matching_po_rows['S/O'].dropna().unique().tolist()
+
+                                    selected_so = st.selectbox("Select an S/O for tracker:", options=so_options, key="china_select_so")
+
+                                    # Assign all records for the PO, but also highlight the selected S/O in tracker
+                                    st.session_state.current_booking = matching_po_rows
+                                    st.session_state.selected_so = selected_so
+
+                                else:
+                                    st.warning("No bookings found with that PO number.")
+
+
+                    # Display the booking if found
+                    if 'current_booking' in st.session_state and not st.session_state.current_booking.empty:
+                        st.subheader("Booking Details")
+
+                        df_to_show = st.session_state.current_booking
+
+                        # If a PO was used and an S/O was selected, optionally highlight that S/O
+                        if 'selected_so' in st.session_state and st.session_state.selected_so and 'S/O' in df_to_show.columns:
+                            df_to_show = df_to_show.copy()
+                            df_to_show.insert(0, 'Selected S/O', df_to_show['S/O'] == st.session_state.selected_so)
+
+                        display_columns = [
+                            'S/O', 'Booking received date', 'Origin Air Port', 'Consignee',
+                            'Shipper', 'PO #', 'Merchant', 'Terms', 'Booked Date (MM/DD/YYYY)',
+                            'Product type', 'Booking Quantity', 'Package Type',
+                            'Booking Gross KGS', 'Volume kgs', 'Booked CBM (m3)', 'Cargo Ready Date',
+                            'Shipment Type'
+                        ]
+                        available_cols = [col for col in display_columns if col in df_to_show.columns]
+                        st.dataframe(
+                            df_to_show[available_cols],
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        # Only run tracker on selected S/O if PO mode used
+                        if 'selected_so' in st.session_state and st.session_state.selected_so and 'S/O' in df_to_show.columns:
+                            tracker_df = df_to_show[df_to_show['S/O'] == st.session_state.selected_so]
+                            if not tracker_df.empty:
+                                booking_tracker_horizontal_clean(tracker_df, st.session_state.delivery_air_df)
+                            else:
+                                st.warning("No tracker data found for the selected S/O.")
+                        else:
+                            if not df_to_show.empty:
+                                booking_tracker_horizontal_clean(df_to_show, st.session_state.delivery_air_df)
+                            else:
+                                st.warning("No booking data to display.")
+
+                    else:
+                        st.info("Enter an S/O number to view booking details")
+
+                except Exception as e:
+                    st.error(f"Failed to load bookings data: {str(e)}")
+
+            with india_tab:
+                try:
+                    xls = load_india_bookings_data()
+                    sheet_names = xls.sheet_names
+
+                    default_sheet = "APRIL 25-26"
+                    if default_sheet in sheet_names:
+                        default_index = sheet_names.index(default_sheet)
+                    else:
+                        default_index = 0
+
+                    # --- Layout: Sheet and Filter mode side-by-side ---
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        selected_sheet = st.selectbox("Select Sheet", options=sheet_names, index=default_index, key="india_sheet_select")
+                    with col2:
+                        filter_mode = st.radio("Filter by", options=["SNO", "PO #"], horizontal=True, key="india_filter_mode")
+
+                    # Load selected sheet (cache)
+                    if "india_last_sheet" not in st.session_state or st.session_state.india_last_sheet != selected_sheet:
+                        df = load_sheet_data_cached(xls, selected_sheet)
+                        st.session_state.india_booking_df = df
+                        st.session_state.india_last_sheet = selected_sheet
+                        st.session_state.india_current_booking = pd.DataFrame()
+                        st.session_state.india_selected_sno = None
+
+                    df = st.session_state.india_booking_df
+
+                    if filter_mode == "SNO":
+                        st.session_state.india_selected_sno = None
+                        sno_input = st.text_input("Enter SNO to search (Exact Match):", key="india_sno_input")
+
+                        if sno_input:
+                            first_col = df.columns[0]
+                            booking = df[df[first_col].astype(str).str.strip() == sno_input.strip()]
+                            if not booking.empty:
+                                st.session_state.india_current_booking = booking
+                            else:
+                                st.warning("No booking found with that exact SNO.")
+                                st.session_state.india_current_booking = pd.DataFrame()
+
+                    else:  # PO # mode
+                        po_input = st.text_input("Enter PO Number:", key="india_po_input")
+
+                        if po_input:
+                            if 'PO #' not in df.columns or 'SNO' not in df.columns:
+                                st.warning("Required columns 'PO #' or 'SNO' not found in the sheet.")
+                            else:
+                                matching_rows = df[df['PO #'].astype(str).str.contains(po_input.strip(), case=False, na=False)]
+                                if not matching_rows.empty:
+                                    sno_options = matching_rows['SNO'].dropna().unique().tolist()
+
+                                    selected_sno = st.selectbox("Select SNO for details:", options=sno_options, key="india_po_sno_select")
+
+                                    # Assign all rows for the PO, but highlight selected SNO
+                                    st.session_state.india_current_booking = matching_rows
+                                    st.session_state.india_selected_sno = selected_sno
+                                else:
+                                    st.warning("No bookings found with that PO number.")
+
+                    # Show result
+                    if not st.session_state.india_current_booking.empty:
+                        st.subheader("India Booking Details")
+
+                        df_to_show = st.session_state.india_current_booking
+
+                        # Optional: highlight selected SNO
+                        if st.session_state.india_selected_sno and 'SNO' in df_to_show.columns:
+                            df_to_show = df_to_show.copy()
+                            df_to_show.insert(0, 'Selected SNO', df_to_show['SNO'] == st.session_state.india_selected_sno)
+
+                        display_columns = [
+                            "SNO", "Booking received date", "Origin Air Port", "Consignee", "Shipper",
+                            "Invoice #", "PO #", "Merchant", "Terms", "Booked Date (MM/DD/YYYY)",
+                            "Product type", "Booking Quantity", "Package Type", "Booking KGS",
+                            "Booked CBM", "Cargo Ready Date"
+                        ]
+                        available_cols = [col for col in display_columns if col in df_to_show.columns]
+                        st.dataframe(df_to_show[available_cols], use_container_width=True, hide_index=True)
+
+                        # Run tracker for selected SNO if available
+                        tracker_df = df_to_show
+                        if st.session_state.india_selected_sno:
+                            tracker_df = df_to_show[df_to_show['SNO'] == st.session_state.india_selected_sno]
+
+                        if not tracker_df.empty:
+                            india_booking_tracker(tracker_df.iloc[0])
+                        else:
+                            st.warning("No tracker data found for selected SNO.")
+
+                    else:
+                        st.info("Enter SNO or PO # to view booking details.")
+
+                except Exception as e:
+                    st.error(f"Failed to load India booking data: {str(e)}")
+
+
     with sea_tab:
         with st.container(border=True):        
             # Initialize combined as empty DataFrame
@@ -3992,9 +4640,8 @@ def run_business_app():
                         "MAWB": "MAWB",
                         "CUSDEC NO": "Cusdec No",
                         "VEHIECAL NO": "Vehicle No",
-                        "SEAL NO": "Seal No",
-                        "ETA_PARSED": "ETA DATE",
-                        "CLEARANCE_PARSED": "Clearance Date"
+                        "ETA DATE ": "ETA DATE",
+                        "CLEARANCE DEAT": "Clearance Date"
                     }
 
                     # Ensure only available columns are included in the display
