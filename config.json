@@ -4,6 +4,27 @@
         "fuzzy_threshold": 45,
         "default_bond_type": "FCL"
     },
+    "data_sources": {
+        "china": {
+            "bookings_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vRURi444OvCBzhhE8JpoT7B3H-M7Jdx-TYX0yPJ4DbfWcgIYZ1BPU13xB9vfujUow/pub?output=xlsx",
+            "delivery_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vRuIk9kF1gp-TlmhHpPkcC75IeWFm4r_QTYtJOePHa0ZcoEaVvUmJiHL6i0R2282YjKfuBwu7-B1CNt/pub?output=xlsx",
+            "sheets": {
+                "bookings": {
+                    "default_sheet": "MAY 2025",
+                    "tracker_sheet": "AIR"
+                },
+                "delivery": {
+                    "air_sheet": "AIR",
+                    "sea_sheet": "SEA_Merchant"
+                }
+            }
+        },
+        "india": {
+            "bookings_url": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQh9PCBs5Z-aq1QV_gBuXYlkv2bjm0-12An8yqVpzntQNctS-vdis7oVnaJ-2BA8J3sCp8U9vYMd2Nh/pub?output=xlsx",
+            "default_sheet": "APRIL 25-26",
+            "tracker_sheet": "AIR"
+        }
+    },
     "columns": [
         "HBL",
         "ETA",
@@ -43,31 +64,31 @@
         "expo": {
             "bond": {
                 "HBL": "HBL",
+                "PO #": "PO # ",
+                "Gross Weight": "Gross Weight",
+                "Status": "Status",
+                "Voyage No": 29,
+                "ATD": "ATD",
+                "Description of Goods": "Description of Goods",
                 "ETA": "ETA",
-                "SBU": "Consignee",
+                "No of Cartons": "No of Cartons",
+                "ATA": "ATA",
                 "CARGO READY DATE": "Shipment Ready Date , Invoice Date",
                 "Origin": "Port of Origin",
                 "Port": "Port of Origin",
-                "Shipper": "Supplier( Name as for the Invoice)",
                 "Inv #": "SUPPLIER Invoice",
-                "PO #": "PO # ",
-                "Description of Goods": "Description of Goods",
-                "No of Cartons": "No of Cartons",
-                "Type": " Type (In two letters)",
-                "Gross Weight": "Gross Weight",
                 "Actual CBM": "CBM (Last two decimals)",
                 "LCL,FCL Status": "LCL,FCL",
                 "Origin Vessel": 27,
                 "Connecting vessel": 28,
-                "Voyage No": 29,
-                "ATD": "ATD",
-                "ATA": "ATA",
-                "Status": "Status",
-                "Container No.": "Container No",
                 "Bond or Non Bond": "BOND/Non BOND",
                 "REMARK": "Comments",
                 "Delivery date": "Delivery Date",
                 "Delivery location": "Location",
+                "Container No.": "Container No",
+                "Shipper": "Supplier( Name as for the Invoice)",
+                "Type": " Type (In two letters)",
+                "SBU": "Consignee",
                 "CUSDEC No": 48,
                 "CUSDEC Date": "Cusdec Date"
             },
